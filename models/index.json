@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "name": "Ornek kalemlik (test)",
+      "url": "models/ornek-kalemlik.glb",
+      "sizeMeters": [
+        0.2,
+        0.039,
+        0.0873
+      ],
+      "partCount": 13,
+      "articulated": true
+    }
+  ]
+}

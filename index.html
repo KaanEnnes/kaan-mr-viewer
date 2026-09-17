@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kaan MR Viewer</title>
+<meta name="description" content="3D modelleri Quest 3'te passthrough ile gercek odana yerlestir.">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧊</text></svg>">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<main id="lobby">
+  <header>
+    <h1>Kaan <span>MR Viewer</span></h1>
+    <p class="tagline">
+      3D modellerini Quest 3'te <strong>passthrough</strong> ile gercek odana
+      yerlestir. Kurulum yok, sideload yok &mdash; tarayicidan ac, gozlugu tak.
+    </p>
+  </header>
+
+  <section id="status" class="card">
+    <div class="status-row">
+      <span class="dot" id="xr-dot"></span>
+      <span id="xr-text">WebXR kontrol ediliyor&hellip;</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>1. Model sec</h2>
+    <div id="model-list" class="model-list">
+      <p class="muted">Katalog yukleniyor&hellip;</p>
+    </div>
+    <label class="filedrop" for="file-input">
+      <input type="file" id="file-input" accept=".glb,.gltf" hidden>
+      <strong>Kendi modelini yukle</strong>
+      <span>GLB veya glTF &mdash; dosya cihazindan okunur, hicbir yere gonderilmez</span>
+    </label>
+  </section>
+
+  <section class="card">
+    <h2>2. Baslat</h2>
+    <button id="enter-ar" disabled>Passthrough'a gir</button>
+    <p class="muted" id="enter-hint">Once bir model sec.</p>
+  </section>
+
+  <section class="card controls">
+    <h2>Kumanda</h2>
+    <dl>
+      <dt>Tetik</dt><dd>Bakilan yuzeye yerlestir</dd>
+      <dt>Kavrama</dt><dd>Tut ve tasi</dd>
+      <dt>Cubuk &larr;&rarr;</dt><dd>Dondur</dd>
+      <dt>Cubuk &uarr;&darr;</dt><dd>Olcekle</dd>
+      <dt>A</dt><dd>Gercek gorunum / hayalet</dd>
+      <dt>B + cubuk</dt><dd>Seffaflik</dd>
+      <dt>X</dt><dd>Fizik ac / kapa</dd>
+    </dl>
+  </section>
+
+  <footer>
+    <p class="muted">
+      Modeller cihazinda calisir, sunucuya yuklenmez.
+      Fizik acikken nesneler gercek zemine duser.
+    </p>
+  </footer>
+</main>
+
+<div id="hud" hidden>
+  <div id="hud-text"></div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
