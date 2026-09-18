@@ -32,6 +32,15 @@ const DEFAULT_SIZE = 0.35;       // metre
 const GRAB_MARGIN = 0.06;        // metre
 const THROW_MAX_SPEED = 6;       // m/s
 const FINGER_RADIUS = 0.01;      // itme kuresi, metre
+// Iki elle olceklemede baslangic mesafesi bundan kucuk sayilmaz: eller
+// yakinken baslayinca kucuk bir acilma modeli bir anda katlarca buyutuyordu.
+const TWO_HAND_MIN_SPAN = 0.15;  // metre
+// Iki elle olcek bir karede en fazla bu oranda degisir (izleme sicramalarini yutar).
+const TWO_HAND_MAX_STEP = 1.06;
+// El bu sureden uzun gorunmezse tuttugu model birakilir.
+const HAND_LOST_RELEASE_MS = 300;
+// Cimdik bu kadar kare ust uste gorulmeden baslamaz (tek karelik izleme hatasi).
+const PINCH_CONFIRM_FRAMES = 2;
 // Oda yuzeylerinden (masa, zemin, duvar) kurulan fizik kutularinin kalinligi.
 // Ince olursa hizli dusen parca yuzeyin icinden gecebiliyor.
 const SURFACE_THICKNESS = 0.05;  // metre
@@ -908,12 +917,23 @@ function updateHand(input, time) {
   const hand = input.hand;
   const thumb = jointWorld(hand, THUMB_TIP, _tipA);
   const index = jointWorld(hand, INDEX_TIP, _tipB);
+  const wasTracked = input.tracked;
   input.tracked = Boolean(thumb && index);
   if (input.tips) for (const t of input.tips) t.visible = input.tracked;
   if (!input.tracked) {
+    // Kayip kisa surerse tutus devam eder (eski noktada donar); uzarsa
+    // birakilir. Yoksa el geri geldiginde model yeni konuma sicriyordu.
+    if (wasTracked) input.lostAt = time;
+    if (input.pinching && time - input.lostAt > HAND_LOST_RELEASE_MS) {
+      input.pinching = false;
+      releaseInput(input);
+    }
     input.hasPrevTip = false;
+    input.pinchFrames = 0;
     return;
   }
+  // Izleme yeni dondu: eski hiz ornekleri firlatmayi bozmasin.
+  if (!wasTracked) input.vel.clear();
 
   input.prevTip.copy(input.tip);
   input.tip.copy(index);
@@ -936,7 +956,8 @@ function updateHand(input, time) {
     for (const t of input.tips) t.material.color.setHex(color);
   }
 
-  if (!input.pinching && dist < startDist && !input.pokingMenu) {
+  input.pinchFrames = dist < startDist && !input.pokingMenu ? (input.pinchFrames || 0) + 1 : 0;
+  if (!input.pinching && input.pinchFrames >= PINCH_CONFIRM_FRAMES) {
     input.pinching = true;
     onPinchStart(input);
   } else if (input.pinching && dist > endDist) {
@@ -949,11 +970,14 @@ function updateHand(input, time) {
 }
 
 function onPinchStart(input) {
-  if (nearModel(input.point) || state.grab) {
+  const near = nearModel(input.point);
+  if (near) {
     grabWith(input);
-  } else {
+  } else if (!state.grab) {
     placeAtReticle();
   }
+  // Model bir eldeyken diger elin uzaktaki cimdigi yok sayilir: eskiden
+  // iki elle olceklemeyi baslatip modeli bir anda buyutuyordu.
 }
 
 /** Sag avuc kullaniciya donunce menu acilir, avucun ustunde durur. */
@@ -1086,7 +1110,7 @@ function startTwoHand(a, b) {
   const mid = new THREE.Vector3().addVectors(a.point, b.point).multiplyScalar(0.5);
   state.twoHand = {
     a, b,
-    d0: Math.max(a.point.distanceTo(b.point), 0.01),
+    d0: Math.max(a.point.distanceTo(b.point), TWO_HAND_MIN_SPAN),
     angle0: yaw(a.point, b.point),
     scale0: m.holder.scale.x,
     quat0: m.holder.quaternion.clone(),
@@ -1107,9 +1131,13 @@ function updateTwoHand() {
   const t = state.twoHand;
   const m = state.model;
   if (!t || !m) return;
+  // Ellerden biri o karede izlenmiyorsa noktasi eskidir: model yerinde kalir.
+  if (!t.a.tracked || !t.b.tracked) return;
   _mid.addVectors(t.a.point, t.b.point).multiplyScalar(0.5);
-  const ratio = t.a.point.distanceTo(t.b.point) / t.d0;
-  const s = Math.min(10, Math.max(0.01, t.scale0 * ratio));
+  const span = Math.max(t.a.point.distanceTo(t.b.point), TWO_HAND_MIN_SPAN);
+  const target = Math.min(10, Math.max(0.01, t.scale0 * span / t.d0));
+  const cur = m.holder.scale.x;
+  const s = Math.min(cur * TWO_HAND_MAX_STEP, Math.max(cur / TWO_HAND_MAX_STEP, target));
   const k = s / t.scale0;
   _dq.setFromAxisAngle(_up, yaw(t.a.point, t.b.point) - t.angle0);
 
