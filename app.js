@@ -6,6 +6,8 @@
  */
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { ThreeMFLoader } from "three/addons/loaders/3MFLoader.js";
+import { unzipSync, strFromU8 } from "three/addons/libs/fflate.module.js";
 import * as CANNON from "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js";
 
 // --- sabitler ---------------------------------------------------------------
@@ -150,7 +152,8 @@ el.file.addEventListener("change", (e) => {
   if (!file) return;
   // Dosya tarayicida okunur; hicbir sunucuya gitmez.
   state.localFile = URL.createObjectURL(file);
-  state.selected = { name: file.name, url: state.localFile, local: true };
+  state.selected = { name: file.name, url: state.localFile, local: true,
+                     format: formatOf(file.name) };
   for (const b of el.list.querySelectorAll(".model")) {
     b.setAttribute("aria-pressed", "false");
   }
@@ -216,12 +219,54 @@ function buildWorld() {
 
 // --- model yukleme ----------------------------------------------------------
 
-const loader = new GLTFLoader();
+const gltfLoader = new GLTFLoader();
+const threeMfLoader = new ThreeMFLoader();
+
+function formatOf(name) {
+  return /\.3mf$/i.test(name) ? "3mf" : "gltf";
+}
 
 function loadGltf(url) {
   return new Promise((resolve, reject) => {
-    loader.load(url, (g) => resolve(g), undefined, (e) => reject(e));
+    gltfLoader.load(url, (g) => resolve(g.scene), undefined, (e) => reject(e));
   });
+}
+
+// 3MF'in kendi birim tanimi; varsayilan milimetre (Tinkercad, dilimleyiciler).
+const MF_UNITS = {
+  micron: 1e-6, millimeter: 1e-3, centimeter: 1e-2,
+  inch: 0.0254, foot: 0.3048, meter: 1,
+};
+
+function read3mfUnit(buffer) {
+  try {
+    const files = unzipSync(new Uint8Array(buffer));
+    const modelPath = Object.keys(files).find((f) => /^3D\/.*\.model$/i.test(f));
+    if (!modelPath) return MF_UNITS.millimeter;
+    // Sadece kok <model> etiketine bakmak yeterli.
+    const head = strFromU8(files[modelPath].subarray(0, 4096));
+    const m = head.match(/<model[^>]*\sunit\s*=\s*"([a-z]+)"/i);
+    return (m && MF_UNITS[m[1].toLowerCase()]) || MF_UNITS.millimeter;
+  } catch {
+    return MF_UNITS.millimeter;
+  }
+}
+
+async function load3mf(url) {
+  const buffer = await (await fetch(url)).arrayBuffer();
+  const group = threeMfLoader.parse(buffer);
+  // 3MF Z-yukari ve genelde milimetre; sahne Y-yukari ve metre.
+  const wrapper = new THREE.Group();
+  group.rotation.x = -Math.PI / 2;
+  group.scale.setScalar(read3mfUnit(buffer));
+  wrapper.add(group);
+  wrapper.updateMatrixWorld(true);
+  return wrapper;
+}
+
+function loadModel(entry) {
+  const format = entry.format || formatOf(entry.url);
+  return format === "3mf" ? load3mf(entry.url) : loadGltf(entry.url);
 }
 
 /**
@@ -232,8 +277,7 @@ function loadGltf(url) {
  * model) tum model tek parca olarak ele alinir.
  */
 async function spawnModel(entry) {
-  const gltf = await loadGltf(entry.url);
-  const root = gltf.scene;
+  const root = await loadModel(entry);
 
   // Collider olarak gomulmus hull'lar cizilmemeli.
   const hulls = [];
