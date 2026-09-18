@@ -623,9 +623,11 @@ const _v2 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 
 /**
- * Her parca icin bir kutu govde kurar. Govdenin konumu/yonu parcanin dunya
- * konumu/yonuyle ayni; kutu, parcanin kendi sinir kutusuna gore ofsetli.
- * Boylece fizik acilinca parcalar yerinden sicramaz.
+ * Her parca icin bir kutu govde kurar. Govde parcanin kendi sinir kutusunun
+ * ortasinda ve parcayla ayni yonde durur; kutle merkezi de orasi olur (parca
+ * orijini geometrinin disinda olabiliyor, oraya koyunca model sallaniyordu).
+ * Parca <-> govde arasindaki sabit ofset "centre" ile tutulur; boylece fizik
+ * acilinca parcalar yerinden sicramaz.
  */
 function buildBodies() {
   const m = state.model;
@@ -648,17 +650,16 @@ function buildBodies() {
     // davransin diye plastige yakin bir yogunluk.
     const mass = Math.max(size.x * size.y * size.z * 400, 0.01);
 
-    const body = new CANNON.Body({ mass });
-    body.addShape(new CANNON.Box(half), new CANNON.Vec3(centre.x, centre.y, centre.z));
-    part.getWorldPosition(_v);
+    const body = new CANNON.Body({ mass, shape: new CANNON.Box(half) });
     part.getWorldQuaternion(_q);
+    part.getWorldPosition(_v).add(_v2.copy(centre).applyQuaternion(_q));
     body.position.set(_v.x, _v.y, _v.z);
     body.quaternion.set(_q.x, _q.y, _q.z, _q.w);
     body.sleepSpeedLimit = 0.08;
     body.linearDamping = 0.02;
     body.angularDamping = 0.05;
     state.world.addBody(body);
-    m.bodies.push({ body, part, scale: ws });
+    m.bodies.push({ body, part, scale: ws, centre });
   }
 }
 
@@ -668,12 +669,13 @@ function removeBodies(m = state.model) {
   m.bodies = [];
 }
 
-/** Govdelerin konumunu parcalara yazar (govde = parcanin dunya donusumu). */
+/** Govdelerin konumunu parcalara yazar (parca orijini = govde - donuk ofset). */
 function syncPartsFromBodies() {
   const m = state.model;
-  for (const { body, part, scale } of m.bodies) {
-    _v.set(body.position.x, body.position.y, body.position.z);
+  for (const { body, part, scale, centre } of m.bodies) {
     _q.set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w);
+    _v.set(body.position.x, body.position.y, body.position.z)
+      .sub(_v2.copy(centre).applyQuaternion(_q));
     _m4.compose(_v, _q, scale);
     _m4b.copy(part.parent.matrixWorld).invert();
     _m4.premultiply(_m4b);
