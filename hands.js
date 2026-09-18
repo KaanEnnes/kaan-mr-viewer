@@ -77,3 +77,91 @@ export class VelocityTracker {
     return out.subVectors(last.p, first.p).divideScalar(dt);
   }
 }
+
+// Gercek elin sanal sahnedeki "golgesi": eklemler arasi kapsuller yalnizca
+// derinlik yazar, renk yazmaz. Passthrough'da gorunen el boylece menunun ve
+// modelin onune gecince onlari gercekten ortuyor; yoksa sanal icerik hep elin
+// ustune ciziliyordu.
+const FINGERS = [
+  ["thumb-metacarpal", "thumb-phalanx-proximal", "thumb-phalanx-distal", "thumb-tip"],
+  ...["index", "middle", "ring", "pinky"].map((f) => [
+    `${f}-finger-metacarpal`, `${f}-finger-phalanx-proximal`,
+    `${f}-finger-phalanx-intermediate`, `${f}-finger-phalanx-distal`, `${f}-finger-tip`,
+  ]),
+];
+
+const SEGMENTS = [];
+for (const chain of FINGERS) {
+  SEGMENTS.push(["wrist", chain[0]]);
+  for (let i = 0; i < chain.length - 1; i++) SEGMENTS.push([chain[i], chain[i + 1]]);
+}
+// Avuc ici bosluklarini doldurmak icin bilekten bogumlara ve bogumlar arasi.
+for (const f of ["index", "middle", "ring", "pinky"]) {
+  SEGMENTS.push(["wrist", `${f}-finger-phalanx-proximal`]);
+}
+SEGMENTS.push(
+  ["index-finger-phalanx-proximal", "middle-finger-phalanx-proximal"],
+  ["middle-finger-phalanx-proximal", "ring-finger-phalanx-proximal"],
+  ["ring-finger-phalanx-proximal", "pinky-finger-phalanx-proximal"],
+  ["thumb-phalanx-proximal", "index-finger-phalanx-proximal"],
+);
+
+// Deri eklem yaricapindan biraz kalin; ortme kenarda bosluk birakmasin.
+const SKIN = 1.25;
+const DEFAULT_RADIUS = 0.009;
+
+export class HandOccluder {
+  constructor(scene) {
+    this.material = new THREE.MeshBasicMaterial({ colorWrite: false });
+    const cyl = new THREE.CylinderGeometry(1, 1, 1, 10, 1, true);
+    const sph = new THREE.SphereGeometry(1, 10, 8);
+    this.group = new THREE.Group();
+    this.segments = SEGMENTS.map(([a, b]) => {
+      const mesh = new THREE.Mesh(cyl, this.material);
+      mesh.renderOrder = -1;
+      this.group.add(mesh);
+      return { a, b, mesh };
+    });
+    const names = new Set(SEGMENTS.flat());
+    this.joints = [...names].map((name) => {
+      const mesh = new THREE.Mesh(sph, this.material);
+      mesh.renderOrder = -1;
+      this.group.add(mesh);
+      return { name, mesh };
+    });
+    scene.add(this.group);
+    this._p = new THREE.Vector3();
+    this._q = new THREE.Vector3();
+    this._up = new THREE.Vector3(0, 1, 0);
+  }
+
+  /** Eli izlenmiyorsa gizler; izleniyorsa kapsulleri eklemlere oturtur. */
+  update(hand, tracked) {
+    this.group.visible = tracked;
+    if (!tracked) return;
+    const radius = (name) => (hand.joints[name]?.jointRadius || DEFAULT_RADIUS) * SKIN;
+
+    for (const j of this.joints) {
+      const p = jointWorld(hand, j.name, this._p);
+      j.mesh.visible = Boolean(p);
+      if (!p) continue;
+      j.mesh.position.copy(p);
+      j.mesh.scale.setScalar(radius(j.name));
+    }
+    for (const s of this.segments) {
+      const a = jointWorld(hand, s.a, this._p);
+      const b = a && jointWorld(hand, s.b, this._q);
+      s.mesh.visible = Boolean(b);
+      if (!b) continue;
+      const len = a.distanceTo(b);
+      const r = Math.min(radius(s.a), radius(s.b));
+      s.mesh.position.addVectors(a, b).multiplyScalar(0.5);
+      s.mesh.quaternion.setFromUnitVectors(this._up, b.sub(a).divideScalar(len || 1));
+      s.mesh.scale.set(r, len, r);
+    }
+  }
+
+  dispose() {
+    this.group.removeFromParent();
+  }
+}

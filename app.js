@@ -11,7 +11,7 @@ import { unzipSync, strFromU8 } from "three/addons/libs/fflate.module.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 import * as CANNON from "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js";
 import {
-  INDEX_TIP, THUMB_TIP, jointWorld, palmNormal, palmCentre, VelocityTracker,
+  INDEX_TIP, THUMB_TIP, jointWorld, palmNormal, palmCentre, VelocityTracker, HandOccluder,
 } from "./hands.js";
 import { WristMenu } from "./menu.js";
 
@@ -77,6 +77,7 @@ const state = {
   surfaces: new Map(),  // XRPlane -> { body, changed }
   surfaceHintShown: false,
   debugText: "",
+  menuPinned: false,
   lastTime: 0,
 };
 
@@ -824,6 +825,7 @@ function setUpInputs() {
       i, controller, grip, hand, ray, pinchAnchor,
       source: null, handedness: "", isHand: false,
       handModel, tips: null,
+      occluder: new HandOccluder(state.scene),
       pinching: false, tracked: false,
       point: new THREE.Vector3(),
       tip: new THREE.Vector3(), prevTip: new THREE.Vector3(), hasPrevTip: false,
@@ -845,6 +847,7 @@ function setUpInputs() {
     });
     controller.addEventListener("disconnected", () => {
       releaseInput(input);
+      input.occluder.update(null, false);
       input.source = null;
       input.isHand = false;
       input.handedness = "";
@@ -919,6 +922,7 @@ function updateHand(input, time) {
   const index = jointWorld(hand, INDEX_TIP, _tipB);
   const wasTracked = input.tracked;
   input.tracked = Boolean(thumb && index);
+  input.occluder.update(hand, input.tracked && settings.handStyle !== "mesh");
   if (input.tips) for (const t of input.tips) t.visible = input.tracked;
   if (!input.tracked) {
     // Kayip kisa surerse tutus devam eder (eski noktada donar); uzarsa
@@ -1017,11 +1021,19 @@ function updateMenuPlacement() {
       menu.group.lookAt(_headPos);
     }
   } else {
-    // Kumanda: sag cubuga basinca ac/kapa; panel kumandanin ustunde durur.
-    if (!menu.visible) return;
+    // Kumanda: el gibi, avuc tarafini kendine cevirince acilir. Grip uzayinda
+    // sag elde +X elin sirtindan disari bakar; avuc yonu -X.
+    // Sag cubuga basinca menu sabitlenir (cevirmeden acik kalir).
     owner.grip.getWorldPosition(_centre);
-    menu.group.position.copy(_centre);
-    menu.group.position.y += 0.2;
+    _normal.set(-1, 0, 0).applyQuaternion(owner.grip.getWorldQuaternion(_q)).normalize();
+    const facing = _normal.dot(_v.subVectors(_headPos, _centre).normalize());
+    const aiming = state.inputs.some((inp) => inp !== owner && inp.source && !inp.isHand && menuRayHit(inp));
+    if (state.menuPinned || facing > 0.45) menu.setVisible(true);
+    else if (facing < 0.15 && !aiming) menu.setVisible(false);
+    if (DEBUG) state.debugText = `kumanda avuc→yuz ${facing.toFixed(2)}`;
+    if (!menu.visible || aiming) return;
+    menu.group.position.copy(_centre).addScaledVector(_normal, 0.04);
+    menu.group.position.y += 0.17;
     menu.group.lookAt(_headPos);
   }
 }
@@ -1056,8 +1068,9 @@ function updateController(input, dt, time) {
 
   if (input.handedness === "right") {
     if (stickClick && !prev.stickClick) {
-      state.menu.setVisible(!state.menu.visible);
-      if (state.menu.visible) hud("Menu: sol kumandanin isi + tetik");
+      state.menuPinned = !state.menuPinned;
+      state.menu.setVisible(state.menuPinned);
+      hud(state.menuPinned ? "Menu sabit · sol isin + tetik ile sec" : "Menu kapandi");
     }
     if (m) {
       if (a && !prev.a) toggleView();
@@ -1492,6 +1505,7 @@ function onFrame(time, frame) {
 
   for (const input of state.inputs) {
     if (!input.source) continue;
+    if (!input.isHand) input.occluder.update(null, false);
     if (input.isHand) updateHand(input, time);
     else updateController(input, dt, time);
   }

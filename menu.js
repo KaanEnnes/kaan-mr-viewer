@@ -56,12 +56,12 @@ export class WristMenu {
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.texture.anisotropy = 4;
 
-    // Menu modelin arkasinda kalsa da okunabilsin: derinlik testi yok,
-    // en son cizilir.
+    // Derinlik testi acik: el golgesi (HandOccluder) menunun onune gecen
+    // gercek eli menunun ustunde birakir. En son cizilir.
     this.mesh = new THREE.Mesh(
       new THREE.PlaneGeometry(MENU_WIDTH, MENU_HEIGHT),
       new THREE.MeshBasicMaterial({
-        map: this.texture, transparent: true, depthTest: false, depthWrite: false,
+        map: this.texture, transparent: true, depthWrite: false,
       }),
     );
     this.mesh.renderOrder = 10;
@@ -332,7 +332,7 @@ export class WristMenu {
       "Cimdik (bosluga): bakilan yere koy",
       "Cimdik (model yaninda): tut, tasi",
       "Iki elle cimdik: boyut + dondur",
-      "Sag avucunu kendine cevir: menu",
+      "Sag avucu / sag kumandayi cevir: menu",
     ];
     y += 6;
     for (const [i, line] of help.entries()) {
