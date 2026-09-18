@@ -744,7 +744,12 @@ function togglePhysics() {
     removeBodies();
     buildBodies();
   }
-  hud(m.physics ? "Fizik acik" : "Fizik kapali");
+  if (m.physics) {
+    const { total, furniture } = surfaceCounts();
+    hud(total ? `Fizik acik · ${furniture} mobilya, ${total - furniture} duzlem` : "Fizik acik · oda taramasi yok");
+  } else {
+    hud("Fizik kapali");
+  }
   state.menu?.invalidate();
 }
 
@@ -1290,62 +1295,137 @@ const _pp = new THREE.Vector3();
 const _pq = new THREE.Quaternion();
 const _ps = new THREE.Vector3();
 
+// Tum odayi kaplayan tarama agi tek kutu olunca odanin icini doldurur; atlanir.
+const MAX_FURNITURE_SIZE = 3.5;  // metre
+
 /**
- * Quest 3'un oda taramasindaki duzlemleri fizige sabit kutu olarak ekler;
- * boylece fizik acikken model masanin ustunde durur, duvara carpar.
+ * Quest 3'un oda taramasini fizige sabit kutular olarak ekler; boylece fizik
+ * acikken model masanin, koltugun ustunde durur, duvara carpar.
  *
- * WebXR'da her duzlemin kendi uzayinda +Y normaldir ve cokgen y=0'dadir.
- * Kutu cokgenin sinir dikdortgeni kadar genis ve yuzeyin arkasinda
- * (-Y yonunde) SURFACE_THICKNESS kalinliginda.
+ * - plane-detection: duvar, zemin, tavan, bazen masa ustu. Her duzlemin kendi
+ *   uzayinda +Y normaldir, cokgen y=0'dadir; kutu yuzeyin arkasinda durur.
+ * - mesh-detection: mobilyalar (masa, koltuk, yatak...) 3B hacim olarak gelir.
+ *   Fizik motoru kutu ile ucgen agini carpistiramadigi icin her mobilya kendi
+ *   sinir kutusuyla eklenir. Tum odayi kaplayan "global mesh" atlanir.
  */
 function updateSurfaces(frame, time) {
-  const planes = frame.detectedPlanes;
-  if (!planes) return;
   const refSpace = state.renderer.xr.getReferenceSpace();
+  const seen = new Set();
 
-  for (const plane of planes) {
-    const known = state.surfaces.get(plane);
-    if (known && known.changed === plane.lastChangedTime) continue;
-    const pose = frame.getPose(plane.planeSpace, refSpace);
-    if (!pose) continue;
-    if (known) state.world.removeBody(known.body);
-
-    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (const pt of plane.polygon) {
-      minX = Math.min(minX, pt.x); maxX = Math.max(maxX, pt.x);
-      minZ = Math.min(minZ, pt.z); maxZ = Math.max(maxZ, pt.z);
+  const planes = frame.detectedPlanes;
+  if (planes) {
+    for (const plane of planes) {
+      seen.add(plane);
+      syncSurface(frame, refSpace, plane, plane.planeSpace, "duzlem", () => planeBox(plane));
     }
-    if (!(maxX > minX && maxZ > minZ)) continue;
-
-    _pm.fromArray(pose.transform.matrix);
-    _pm.decompose(_pp, _pq, _ps);
-    _ps.set((minX + maxX) / 2, -SURFACE_THICKNESS / 2, (minZ + maxZ) / 2).applyMatrix4(_pm);
-
-    const body = new CANNON.Body({
-      type: CANNON.Body.STATIC,
-      shape: new CANNON.Box(new CANNON.Vec3(
-        (maxX - minX) / 2, SURFACE_THICKNESS / 2, (maxZ - minZ) / 2)),
-    });
-    body.position.set(_ps.x, _ps.y, _ps.z);
-    body.quaternion.set(_pq.x, _pq.y, _pq.z, _pq.w);
-    state.world.addBody(body);
-    state.surfaces.set(plane, { body, changed: plane.lastChangedTime });
   }
-
-  for (const [plane, { body }] of state.surfaces) {
-    if (!planes.has(plane)) {
-      state.world.removeBody(body);
-      state.surfaces.delete(plane);
+  const meshes = frame.detectedMeshes;
+  if (meshes) {
+    for (const mesh of meshes) {
+      if (/global/i.test(mesh.semanticLabel || "")) continue;
+      seen.add(mesh);
+      syncSurface(frame, refSpace, mesh, mesh.meshSpace, mesh.semanticLabel || "mobilya", () => meshBox(mesh));
     }
   }
 
-  // Masa/duvar yoksa model hep yere duser; kullaniciya sebebini soyle.
+  for (const [key, entry] of state.surfaces) {
+    if (seen.has(key)) continue;
+    removeSurface(entry);
+    state.surfaces.delete(key);
+  }
+
+  // Oda verisi yoksa model hep yere duser; kullaniciya sebebini soyle.
   if (!state.surfaceHintShown && time - state.sessionStart > 6000) {
     state.surfaceHintShown = true;
-    if (state.surfaces.size === 0) {
-      hud("Oda taramasi yok: Quest Ayarlar > Fiziksel alan > Alan kurulumu", 7000);
+    const { furniture, total } = surfaceCounts();
+    if (!planes && !meshes) {
+      hud("Oda verisi izni yok: tarayici ayarlarindan 'uzamsal veri'ye izin ver", 8000);
+    } else if (total === 0) {
+      hud("Oda taramasi yok: Quest Ayarlar > Fiziksel alan > Alan kurulumu", 8000);
+    } else if (furniture === 0) {
+      hud("Taramada mobilya yok: Alan kurulumunda masalari da isaretle", 8000);
     }
   }
+}
+
+function planeBox(plane) {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const pt of plane.polygon) {
+    minX = Math.min(minX, pt.x); maxX = Math.max(maxX, pt.x);
+    minZ = Math.min(minZ, pt.z); maxZ = Math.max(maxZ, pt.z);
+  }
+  if (!(maxX > minX && maxZ > minZ)) return null;
+  return new THREE.Box3(
+    new THREE.Vector3(minX, -SURFACE_THICKNESS, minZ),
+    new THREE.Vector3(maxX, 0, maxZ));
+}
+
+function meshBox(mesh) {
+  const v = mesh.vertices;
+  if (!v || v.length < 9) return null;
+  const box = new THREE.Box3();
+  for (let i = 0; i < v.length; i += 3) box.expandByPoint(_ps.set(v[i], v[i + 1], v[i + 2]));
+  const size = box.getSize(_ps);
+  if (Math.max(size.x, size.y, size.z) > MAX_FURNITURE_SIZE) return null;
+  return box;
+}
+
+/** Yuzeyi (yeniden) kurar; sadece taramada degistiyse. */
+function syncSurface(frame, refSpace, key, space, label, makeBox) {
+  const known = state.surfaces.get(key);
+  if (known && known.changed === key.lastChangedTime) return;
+  const pose = frame.getPose(space, refSpace);
+  if (!pose) return;
+  if (known) removeSurface(known);
+
+  const entry = { body: null, debug: null, label, changed: key.lastChangedTime };
+  state.surfaces.set(key, entry);
+  const box = makeBox();
+  if (!box) return;
+
+  const half = box.getSize(new THREE.Vector3()).multiplyScalar(0.5);
+  half.max(new THREE.Vector3(0.005, 0.005, 0.005));
+  _pm.fromArray(pose.transform.matrix);
+  _pm.decompose(_pp, _pq, _ps);
+  const centre = box.getCenter(new THREE.Vector3()).applyMatrix4(_pm);
+
+  const body = new CANNON.Body({
+    type: CANNON.Body.STATIC,
+    shape: new CANNON.Box(new CANNON.Vec3(half.x, half.y, half.z)),
+  });
+  body.position.set(centre.x, centre.y, centre.z);
+  body.quaternion.set(_pq.x, _pq.y, _pq.z, _pq.w);
+  state.world.addBody(body);
+  entry.body = body;
+
+  if (DEBUG) {
+    // ?debug: gozlugun odadan ne bildigini gor (mobilya turuncu, duzlem mavi).
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(half.x * 2, half.y * 2, half.z * 2)),
+      new THREE.LineBasicMaterial({ color: label === "duzlem" ? 0x6ea8fe : 0xf5a524 }));
+    edges.position.copy(centre);
+    edges.quaternion.copy(_pq);
+    state.scene.add(edges);
+    entry.debug = edges;
+  }
+}
+
+function removeSurface(entry) {
+  if (entry.body) state.world.removeBody(entry.body);
+  if (entry.debug) {
+    entry.debug.removeFromParent();
+    entry.debug.geometry.dispose();
+  }
+}
+
+function surfaceCounts() {
+  let total = 0, furniture = 0;
+  for (const e of state.surfaces.values()) {
+    if (!e.body) continue;
+    total++;
+    if (e.label !== "duzlem") furniture++;
+  }
+  return { total, furniture };
 }
 
 // --- menu baglantisi --------------------------------------------------------
@@ -1420,7 +1500,9 @@ async function enterAR() {
   try {
     session = await navigator.xr.requestSession("immersive-ar", {
       requiredFeatures: ["local-floor"],
-      optionalFeatures: ["hit-test", "anchors", "plane-detection", "hand-tracking", "dom-overlay"],
+      optionalFeatures: [
+        "hit-test", "anchors", "plane-detection", "mesh-detection", "hand-tracking", "dom-overlay",
+      ],
       domOverlay: { root: document.getElementById("hud") },
     });
   } catch (err) {
@@ -1516,7 +1598,8 @@ function onFrame(time, frame) {
     state.lastDebug = time;
     const hands = state.inputs.filter((i) => i.source)
       .map((i) => `${i.handedness[0] || "?"}:${i.isHand ? (i.tracked ? "el" : "el-yok") : "kum"}`).join(" ");
-    showToast(`${hands} · yuzey ${state.surfaces.size} · ${state.debugText}`, 1000);
+    const { total, furniture } = surfaceCounts();
+    showToast(`${hands} · mobilya ${furniture}/${total} · ${state.debugText}`, 1000);
   }
 
   const m = state.model;
