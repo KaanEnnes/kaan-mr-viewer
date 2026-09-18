@@ -129,6 +129,8 @@ header h1 span {
 
 .model-delete,
 .link-btn {
+  width: auto;
+  flex: none;
   padding: 0 14px;
   background: transparent;
   border: 1px solid var(--line);
@@ -139,11 +141,11 @@ header h1 span {
   cursor: pointer;
 }
 .model-delete:hover { color: var(--err); border-color: var(--err); }
-.link-btn { padding: 4px 10px; }
+.link-btn { padding: 4px 12px; }
 .link-btn:hover { color: var(--text); }
 
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.card-head h2 { margin: 0; }
+.card-head h2 { margin: 0; white-space: nowrap; }
 .card-head + .model-list { margin-top: 12px; }
 
 .badge.cloud { background: var(--accent-soft); color: var(--accent); }
