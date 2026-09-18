@@ -32,6 +32,11 @@ const DEFAULT_SIZE = 0.35;       // metre
 const GRAB_MARGIN = 0.06;        // metre
 const THROW_MAX_SPEED = 6;       // m/s
 const FINGER_RADIUS = 0.01;      // itme kuresi, metre
+// Oda yuzeylerinden (masa, zemin, duvar) kurulan fizik kutularinin kalinligi.
+// Ince olursa hizli dusen parca yuzeyin icinden gecebiliyor.
+const SURFACE_THICKNESS = 0.05;  // metre
+// ?debug ile acilinca gozlukte el/yuzey olcumleri gosterilir.
+const DEBUG = new URLSearchParams(location.search).has("debug");
 
 // PC'den yuklenen modellerin durdugu bulut deposu (Cloudflare Worker + R2).
 // Boylece PC'de yuklenen model gozlukte de listelenir.
@@ -60,6 +65,9 @@ const state = {
   toast: null,
   needsPlacement: false,
   loading: false,
+  surfaces: new Map(),  // XRPlane -> { body, changed }
+  surfaceHintShown: false,
+  debugText: "",
   lastTime: 0,
 };
 
@@ -969,9 +977,13 @@ function updateMenuPlacement() {
     }
     const facing = normal.dot(_v.subVectors(_headPos, centre).normalize());
     const someonePoking = state.inputs.some((inp) => inp.pokingMenu);
-    // Acma/kapama esikleri farkli: sinirda titreyip yanip sonmesin.
-    if (facing > 0.55) menu.setVisible(true);
-    else if (facing < 0.25 && !someonePoking) menu.setVisible(false);
+    // Avuc yuze donukse ya da yukari bakiyorsa acilir. Acma/kapama esikleri
+    // farkli: sinirda titreyip yanip sonmesin.
+    const open = facing > 0.4 || normal.y > 0.75;
+    const closed = facing < 0.1 && normal.y < 0.5;
+    if (open) menu.setVisible(true);
+    else if (closed && !someonePoking) menu.setVisible(false);
+    if (DEBUG) state.debugText = `avuc→yuz ${facing.toFixed(2)} yukari ${normal.y.toFixed(2)}`;
     if (!menu.visible) return;
     // Paneli avucun ustune kaldir ve yuzunu kullaniciya cevir. Dokunurken
     // yerinde tutuluyor, yoksa parmak iterken panel kacar.
@@ -1230,6 +1242,71 @@ function placeAtReticle() {
   hud("Yerlestirildi", 900);
 }
 
+// --- oda yuzeyleri (masa, zemin, duvar) --------------------------------------
+
+const _pm = new THREE.Matrix4();
+const _pp = new THREE.Vector3();
+const _pq = new THREE.Quaternion();
+const _ps = new THREE.Vector3();
+
+/**
+ * Quest 3'un oda taramasindaki duzlemleri fizige sabit kutu olarak ekler;
+ * boylece fizik acikken model masanin ustunde durur, duvara carpar.
+ *
+ * WebXR'da her duzlemin kendi uzayinda +Y normaldir ve cokgen y=0'dadir.
+ * Kutu cokgenin sinir dikdortgeni kadar genis ve yuzeyin arkasinda
+ * (-Y yonunde) SURFACE_THICKNESS kalinliginda.
+ */
+function updateSurfaces(frame, time) {
+  const planes = frame.detectedPlanes;
+  if (!planes) return;
+  const refSpace = state.renderer.xr.getReferenceSpace();
+
+  for (const plane of planes) {
+    const known = state.surfaces.get(plane);
+    if (known && known.changed === plane.lastChangedTime) continue;
+    const pose = frame.getPose(plane.planeSpace, refSpace);
+    if (!pose) continue;
+    if (known) state.world.removeBody(known.body);
+
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const pt of plane.polygon) {
+      minX = Math.min(minX, pt.x); maxX = Math.max(maxX, pt.x);
+      minZ = Math.min(minZ, pt.z); maxZ = Math.max(maxZ, pt.z);
+    }
+    if (!(maxX > minX && maxZ > minZ)) continue;
+
+    _pm.fromArray(pose.transform.matrix);
+    _pm.decompose(_pp, _pq, _ps);
+    _ps.set((minX + maxX) / 2, -SURFACE_THICKNESS / 2, (minZ + maxZ) / 2).applyMatrix4(_pm);
+
+    const body = new CANNON.Body({
+      type: CANNON.Body.STATIC,
+      shape: new CANNON.Box(new CANNON.Vec3(
+        (maxX - minX) / 2, SURFACE_THICKNESS / 2, (maxZ - minZ) / 2)),
+    });
+    body.position.set(_ps.x, _ps.y, _ps.z);
+    body.quaternion.set(_pq.x, _pq.y, _pq.z, _pq.w);
+    state.world.addBody(body);
+    state.surfaces.set(plane, { body, changed: plane.lastChangedTime });
+  }
+
+  for (const [plane, { body }] of state.surfaces) {
+    if (!planes.has(plane)) {
+      state.world.removeBody(body);
+      state.surfaces.delete(plane);
+    }
+  }
+
+  // Masa/duvar yoksa model hep yere duser; kullaniciya sebebini soyle.
+  if (!state.surfaceHintShown && time - state.sessionStart > 6000) {
+    state.surfaceHintShown = true;
+    if (state.surfaces.size === 0) {
+      hud("Oda taramasi yok: Quest Ayarlar > Fiziksel alan > Alan kurulumu", 7000);
+    }
+  }
+}
+
 // --- menu baglantisi --------------------------------------------------------
 
 function buildMenu() {
@@ -1313,6 +1390,9 @@ async function enterAR() {
 
   state.session = session;
   state.inputs = [];
+  state.surfaces = new Map();
+  state.surfaceHintShown = false;
+  state.sessionStart = 0;
   state.grab = null;
   state.twoHand = null;
   state.renderer.domElement.style.display = "";
@@ -1365,6 +1445,11 @@ function onFrame(time, frame) {
       : "Cimdik: yerlestir · menu: sag avucunu cevir", 4000);
   }
 
+  if (frame) {
+    if (!state.sessionStart) state.sessionStart = time;
+    updateSurfaces(frame, time);
+  }
+
   if (frame && state.hitTestSource) {
     const refSpace = state.renderer.xr.getReferenceSpace();
     const hits = frame.getHitTestResults(state.hitTestSource);
@@ -1385,6 +1470,12 @@ function onFrame(time, frame) {
   if (state.twoHand) updateTwoHand();
   updateMenuPlacement();
   state.menu.update();
+  if (DEBUG && time - (state.lastDebug || 0) > 400) {
+    state.lastDebug = time;
+    const hands = state.inputs.filter((i) => i.source)
+      .map((i) => `${i.handedness[0] || "?"}:${i.isHand ? (i.tracked ? "el" : "el-yok") : "kum"}`).join(" ");
+    showToast(`${hands} · yuzey ${state.surfaces.size} · ${state.debugText}`, 1000);
+  }
 
   const m = state.model;
   if (m && m.physics && dt > 0) {

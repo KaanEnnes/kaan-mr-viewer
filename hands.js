@@ -21,14 +21,18 @@ export function jointWorld(hand, name, out) {
 }
 
 /**
- * Avucun baktigi yon (birim vektor). Bilek, isaret ve serce parmak kok
- * eklemlerinin olusturdugu duzlemin normali; sag ve sol elde capraz carpim
- * sirasi ters.
+ * Avucun baktigi yon (birim vektor). Bilek ile isaret ve serce parmak
+ * bogumlarinin (phalanx-proximal) olusturdugu duzlemin normali; sag ve sol
+ * elde capraz carpim sirasi ters.
+ *
+ * "metacarpal" eklemleri kullanilmamali: WebXR'da avucun dibinde, bilege
+ * neredeyse yapisik dururlar; aradaki vektorler milimetrik kalir ve normal
+ * gurultuden ibaret olur.
  */
 export function palmNormal(hand, handedness, out) {
   if (!jointWorld(hand, "wrist", _w)
-    || !jointWorld(hand, "index-finger-metacarpal", _a)
-    || !jointWorld(hand, "pinky-finger-metacarpal", _b)) return null;
+    || !jointWorld(hand, "index-finger-phalanx-proximal", _a)
+    || !jointWorld(hand, "pinky-finger-phalanx-proximal", _b)) return null;
   _a.sub(_w);
   _b.sub(_w);
   return handedness === "left"
@@ -36,10 +40,10 @@ export function palmNormal(hand, handedness, out) {
     : out.crossVectors(_a, _b).normalize();
 }
 
-/** Avuc merkezi: bilek ile orta parmak kokunun ortasi. */
+/** Avuc merkezi: bilek ile orta parmak bogumunun ortasi. */
 export function palmCentre(hand, out) {
   if (!jointWorld(hand, "wrist", _w)
-    || !jointWorld(hand, "middle-finger-metacarpal", _a)) return null;
+    || !jointWorld(hand, "middle-finger-phalanx-proximal", _a)) return null;
   return out.addVectors(_w, _a).multiplyScalar(0.5);
 }
 
