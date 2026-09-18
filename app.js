@@ -22,6 +22,11 @@ const OPACITY_SPEED = 1.2;  // birim/saniye
 // birakmazsak fizik acildigi anda zemine gomulmus sayiliyor.
 const FLOOR_EPSILON = 0.005;
 
+// PC'den yuklenen modellerin durdugu bulut deposu (Cloudflare Worker + R2).
+// Boylece PC'de yuklenen model gozlukte de listelenir.
+const API = "https://vr-api.kaanai.site";
+const KEY_STORAGE = "kaan-mr-viewer.uploadKey";
+
 // --- durum ------------------------------------------------------------------
 
 const state = {
@@ -47,6 +52,7 @@ const el = {
   xrText: document.getElementById("xr-text"),
   list: document.getElementById("model-list"),
   file: document.getElementById("file-input"),
+  refresh: document.getElementById("refresh"),
   enter: document.getElementById("enter-ar"),
   hint: document.getElementById("enter-hint"),
   hud: document.getElementById("hud"),
@@ -90,15 +96,25 @@ function hud(text, ms = 2000) {
 // --- katalog ----------------------------------------------------------------
 
 async function loadCatalog() {
+  const [local, cloud] = await Promise.all([
+    fetchCatalog("models/index.json"),
+    fetchCatalog(`${API}/models`),
+  ]);
+  for (const m of cloud) m.cloud = true;
+  // Yeni yuklenenler en ustte.
+  state.catalog = [...cloud, ...local];
+  renderCatalog();
+}
+
+async function fetchCatalog(url) {
   try {
-    const res = await fetch("models/index.json", { cache: "no-cache" });
+    const res = await fetch(url, { cache: "no-cache" });
     if (!res.ok) throw new Error(res.status);
     const data = await res.json();
-    state.catalog = data.models || [];
+    return data.models || [];
   } catch {
-    state.catalog = [];
+    return [];
   }
-  renderCatalog();
 }
 
 function renderCatalog() {
@@ -107,29 +123,123 @@ function renderCatalog() {
     const p = document.createElement("p");
     p.className = "muted";
     p.textContent =
-      "Katalogda model yok. Asagidan kendi GLB dosyani yukleyebilirsin.";
+      "Katalogda model yok. Asagidan kendi modelini yukleyebilirsin.";
     el.list.appendChild(p);
     return;
   }
 
+  const canDelete = Boolean(readKey());
   for (const m of state.catalog) {
+    const row = document.createElement("div");
+    row.className = "model-row";
+
     const btn = document.createElement("button");
     btn.className = "model";
     btn.type = "button";
-    btn.setAttribute("aria-pressed", "false");
+    btn.setAttribute("aria-pressed", String(state.selected?.url === m.url));
 
-    const size = Array.isArray(m.sizeMeters)
+    const meta = Array.isArray(m.sizeMeters)
       ? m.sizeMeters.map((v) => v.toFixed(2)).join(" x ") + " m"
-      : "";
+      : m.cloud ? formatBytes(m.bytes) : "";
 
     btn.innerHTML =
       `<span class="name">${escapeHtml(m.name)}` +
       (m.articulated ? `<span class="badge">${m.partCount} parca</span>` : "") +
-      `</span><span class="meta">${size}</span>`;
+      (m.cloud ? `<span class="badge cloud">${m.format === "3mf" ? "3MF" : "GLB"}</span>` : "") +
+      `</span><span class="meta">${meta}</span>`;
 
     btn.addEventListener("click", () => selectModel(m, btn));
-    el.list.appendChild(btn);
+    row.appendChild(btn);
+
+    if (m.cloud && canDelete) {
+      const del = document.createElement("button");
+      del.className = "model-delete";
+      del.type = "button";
+      del.title = `"${m.name}" modelini sil`;
+      del.setAttribute("aria-label", del.title);
+      del.textContent = "Sil";
+      del.addEventListener("click", () => deleteModel(m));
+      row.appendChild(del);
+    }
+    el.list.appendChild(row);
   }
+}
+
+function formatBytes(n) {
+  if (!n) return "";
+  return n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB`
+    : `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// --- bulut yukleme ----------------------------------------------------------
+
+function readKey() {
+  try { return localStorage.getItem(KEY_STORAGE) || ""; } catch { return ""; }
+}
+
+function writeKey(key) {
+  try {
+    if (key) localStorage.setItem(KEY_STORAGE, key);
+    else localStorage.removeItem(KEY_STORAGE);
+  } catch { /* gizli pencere: her seferinde sorulur */ }
+}
+
+/** Yukleme sifresini dondurur; yoksa bir kez sorar ve bu cihazda hatirlar. */
+function askKey() {
+  let key = readKey();
+  if (!key) {
+    key = (window.prompt(
+      "Yukleme sifresi (bir kez sorulur, bu cihazda hatirlanir).\n" +
+      "Bos birakirsan model sadece bu cihazda acilir.") || "").trim();
+    if (key) writeKey(key);
+  }
+  return key;
+}
+
+/** Dosyayi buluta yukler; ilerlemeyi gostermek icin XHR kullaniliyor. */
+function uploadFile(file, key) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", `${API}/models?name=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader("Authorization", `Bearer ${key}`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        el.hint.textContent = `Yukleniyor… %${Math.round((e.loaded / e.total) * 100)}`;
+      }
+    };
+    xhr.onload = () => {
+      let body = {};
+      try { body = JSON.parse(xhr.responseText); } catch { /* bos */ }
+      if (xhr.status === 201) resolve(body);
+      else {
+        const err = new Error(body.error || `HTTP ${xhr.status}`);
+        err.status = xhr.status;
+        reject(err);
+      }
+    };
+    xhr.onerror = () => reject(new Error("baglanti hatasi"));
+    xhr.send(file);
+  });
+}
+
+async function deleteModel(m) {
+  if (!window.confirm(`"${m.name}" buluttan silinsin mi? Tum cihazlardan kalkar.`)) return;
+  try {
+    const res = await fetch(`${API}/models/${encodeURIComponent(m.id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${readKey()}` },
+    });
+    if (res.status === 401) writeKey("");
+    if (!res.ok) throw new Error(res.status === 401 ? "sifre yanlis" : `HTTP ${res.status}`);
+    if (state.selected?.url === m.url) {
+      state.selected = null;
+      el.enter.disabled = true;
+      el.hint.textContent = "Once bir model sec.";
+    }
+  } catch (err) {
+    el.hint.textContent = "Silinemedi: " + err.message;
+  }
+  loadCatalog();
 }
 
 function escapeHtml(s) {
@@ -147,18 +257,45 @@ function selectModel(entry, btn) {
   el.hint.textContent = `"${entry.name}" secildi.`;
 }
 
-el.file.addEventListener("change", (e) => {
+el.file.addEventListener("change", async (e) => {
   const file = e.target.files && e.target.files[0];
+  e.target.value = ""; // ayni dosya tekrar secilebilsin
   if (!file) return;
-  // Dosya tarayicida okunur; hicbir sunucuya gitmez.
-  state.localFile = URL.createObjectURL(file);
-  state.selected = { name: file.name, url: state.localFile, local: true,
-                     format: formatOf(file.name) };
   for (const b of el.list.querySelectorAll(".model")) {
     b.setAttribute("aria-pressed", "false");
   }
+
+  const key = askKey();
+  if (key) {
+    el.enter.disabled = true;
+    try {
+      const saved = await uploadFile(file, key);
+      state.selected = { name: file.name, url: saved.url, format: formatOf(file.name), cloud: true };
+      state.localFile = null;
+      await loadCatalog();
+      el.hint.textContent = `"${file.name}" buluta yuklendi — gozlukte de listede.`;
+      el.enter.disabled = false;
+      return;
+    } catch (err) {
+      if (err.status === 401) writeKey("");
+      el.hint.textContent = `Buluta yuklenemedi (${err.message}); sadece bu cihazda acilacak.`;
+    }
+  }
+
+  // Sifre yoksa ya da yukleme basarisizsa: dosya yalnizca bu cihazda okunur.
+  state.localFile = URL.createObjectURL(file);
+  state.selected = { name: file.name, url: state.localFile, local: true,
+                     format: formatOf(file.name) };
   el.enter.disabled = false;
-  el.hint.textContent = `"${file.name}" secildi.`;
+  if (!key) el.hint.textContent = `"${file.name}" secildi (sadece bu cihazda).`;
+});
+
+el.refresh.addEventListener("click", loadCatalog);
+
+// Gozluk sekmesi one gelince katalog tazelenir: PC'den yeni yuklenen model
+// sayfayi yenilemeden gorunur.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !state.session) loadCatalog();
 });
 
 // --- sahne ------------------------------------------------------------------

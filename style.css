@@ -124,6 +124,30 @@ header h1 span {
   transition: border-color 0.15s, background 0.15s;
 }
 
+.model-row { display: flex; gap: 8px; align-items: stretch; }
+.model-row .model { flex: 1; min-width: 0; }
+
+.model-delete,
+.link-btn {
+  padding: 0 14px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.model-delete:hover { color: var(--err); border-color: var(--err); }
+.link-btn { padding: 4px 10px; }
+.link-btn:hover { color: var(--text); }
+
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.card-head h2 { margin: 0; }
+.card-head + .model-list { margin-top: 12px; }
+
+.badge.cloud { background: var(--accent-soft); color: var(--accent); }
+
 .model:hover { border-color: var(--line); }
 
 .model[aria-pressed="true"] {

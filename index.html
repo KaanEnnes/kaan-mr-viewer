@@ -35,14 +35,17 @@
   </section>
 
   <section class="card">
-    <h2>1. Model sec</h2>
+    <div class="card-head">
+      <h2>1. Model sec</h2>
+      <button type="button" id="refresh" class="link-btn">Yenile</button>
+    </div>
     <div id="model-list" class="model-list">
       <p class="muted">Katalog yukleniyor&hellip;</p>
     </div>
     <label class="filedrop" for="file-input">
       <input type="file" id="file-input" accept=".glb,.gltf,.3mf" hidden>
       <strong>Kendi modelini yukle</strong>
-      <span>GLB, glTF veya 3MF &mdash; dosya cihazindan okunur, hicbir yere gonderilmez</span>
+      <span>GLB, glTF veya 3MF &mdash; buluta yuklenir, gozlukte de listede gorunur</span>
     </label>
   </section>
 
