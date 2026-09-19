@@ -1763,6 +1763,9 @@ function syncSurface(frame, refSpace, key, space, label, makeBox) {
   });
   body.position.set(centre.x, centre.y, centre.z);
   body.quaternion.set(_pq.x, _pq.y, _pq.z, _pq.w);
+  // Sabit govdenin sinir kutusu konum degisince kendiliginden yenilenmiyor;
+  // yenilenmezse isin testi (golge) ve broadphase govdeyi orijinde sanir.
+  body.updateAABB();
   state.world.addBody(body);
   entry.body = body;
 
@@ -1828,6 +1831,7 @@ function learnSurface(matrix) {
   });
   body.position.set(centre.x, centre.y, centre.z);
   body.quaternion.set(_hitQuat.x, _hitQuat.y, _hitQuat.z, _hitQuat.w);
+  body.updateAABB(); // bkz. syncSurface
   state.world.addBody(body);
 
   const patch = { body, debug: null, label: "yama", pos: _hitPos.clone(), horizontal };
