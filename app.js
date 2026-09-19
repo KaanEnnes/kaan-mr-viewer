@@ -15,6 +15,7 @@ import {
 import { WristMenu } from "./menu.js";
 import { splitDisconnected } from "./split.js";
 import { parse3mf, MF_UNITS } from "./threemf.js";
+import { SoftOcclusion } from "./occlusion.js";
 import { Label, ShadowCatcher, Ruler, Section, SECTION_MODES, WristButton } from "./tools.js";
 
 // --- sabitler ---------------------------------------------------------------
@@ -45,6 +46,9 @@ const HAND_LOST_RELEASE_MS = 300;
 const PINCH_CONFIRM_FRAMES = 2;
 // Parcalari ayirinca her parca merkezden uzakligi orani kadar daha acilir.
 const EXPLODE_FACTOR = 0.9;
+// Bu kadar yakin (gercek boyutta) parcalar birbirine bagli sayilir: print-in-place
+// tasarimlarda hareketli parcalar arasinda ~0.3-0.5 mm baski boslugu olur.
+const JOINT_GAP = 0.0015;        // metre
 const EXPLODE_SPEED = 3;         // saniyede tamamlanan oran
 // Kalici konumlar: model adresi -> { uuid, scale }
 const ANCHOR_STORAGE = "kaan-mr-viewer.anchors";
@@ -625,6 +629,7 @@ async function spawnModel(entry) {
     const cloneMat = (mat) => {
       // Materyali klonluyoruz ki ayni modelin ikinci kopyasi etkilenmesin.
       const c = mat.clone();
+      state.occlusion?.patch(c);
       materials.push(c);
       return c;
     };
@@ -804,10 +809,57 @@ function buildBodies() {
     state.world.addBody(body);
     m.bodies.push({ body, part, scale: ws, centre });
   }
+  connectParts(m);
+}
+
+/**
+ * Birbirine degen parcalari mentese gibi baglar. Temas bolgesi (iki parcanin
+ * genisletilmis kutularinin kesisimi) bulunur; bolgenin en uzun yonu mentese
+ * ekseni olur ve o eksen uzerindeki iki noktadan noktasal baglanti kurulur:
+ * iki noktali baglanti o cizgi etrafinda donmeye izin verir, ayrilmaya degil.
+ * Bagli parcalar arasinda carpisma kapali: kutu yaklasiminda ic ice gecerler
+ * ve carpisma acik kalirsa birbirlerini iterek firlatirlar.
+ */
+function connectParts(m) {
+  m.constraints = [];
+  const n = m.bodies.length;
+  if (n < 2) return;
+  const tol = Math.max(JOINT_GAP * m.holder.scale.x, 1e-4);
+  const boxes = m.bodies.map(({ part }) => new THREE.Box3().setFromObject(part).expandByScalar(tol));
+  const inter = new THREE.Box3();
+  const size = new THREE.Vector3();
+  const centre = new THREE.Vector3();
+  const pivot = new THREE.Vector3();
+  const world = new CANNON.Vec3();
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (!boxes[i].intersectsBox(boxes[j])) continue;
+      inter.copy(boxes[i]).intersect(boxes[j]);
+      inter.getSize(size);
+      inter.getCenter(centre);
+      const axis = size.x >= size.y && size.x >= size.z ? "x" : size.y >= size.z ? "y" : "z";
+      const reach = size[axis] * 0.4;
+      const A = m.bodies[i].body;
+      const B = m.bodies[j].body;
+      for (const sign of [-1, 1]) {
+        pivot.copy(centre);
+        pivot[axis] += sign * reach;
+        world.set(pivot.x, pivot.y, pivot.z);
+        const joint = new CANNON.PointToPointConstraint(
+          A, A.pointToLocalFrame(world), B, B.pointToLocalFrame(world));
+        joint.collideConnected = false;
+        state.world.addConstraint(joint);
+        m.constraints.push(joint);
+      }
+    }
+  }
 }
 
 function removeBodies(m = state.model) {
   if (!m) return;
+  for (const joint of m.constraints || []) state.world.removeConstraint(joint);
+  m.constraints = [];
   for (const { body } of m.bodies) state.world.removeBody(body);
   m.bodies = [];
 }
@@ -840,13 +892,14 @@ function setOpacity(value) {
   const m = state.model;
   if (!m) return;
   m.opacity = Math.min(1, Math.max(0, value));
-  const transparent = m.opacity < 0.999;
+  const see = m.opacity < 0.999;
   for (const mat of m.materials) {
-    mat.transparent = transparent;
+    // Yumusak ortme alfa ile calisir: acikken opak model de karistirilir.
+    mat.transparent = see || Boolean(state.occlusion);
     mat.opacity = m.opacity;
     // Yari saydam yuzeyler derinlige yazmamali, yoksa passthrough uzerinde
     // kendi arkasini kesip yanlis siralanir.
-    mat.depthWrite = !transparent;
+    mat.depthWrite = !see;
     mat.needsUpdate = true;
   }
   state.menu?.invalidate();
@@ -871,8 +924,8 @@ function togglePhysics() {
     buildBodies();
   }
   if (m.physics) {
-    const { total, furniture, patches } = surfaceCounts();
-    hud(`Fizik acik · ${patches} yuzey yamasi, ${furniture} mobilya, ${total - furniture} duzlem`, 3000);
+    const { total, furniture, patches, roomMesh } = surfaceCounts();
+    hud(`Fizik acik · ${roomMesh ? "oda agi, " : ""}${furniture} mobilya, ${total - furniture} duzlem, ${patches} yama`, 3000);
   } else {
     hud("Fizik kapali");
   }
@@ -1671,6 +1724,12 @@ const PATCH_SPACING = 0.12;     // bu mesafeden yakin yeni yama eklenmez
 const PATCH_HEIGHT_TOL = 0.025; // ayni yuzey sayilan yukseklik farki
 const MAX_PATCHES = 500;
 
+// Oda agindan (global mesh) kurulan yukseklik haritasi: hucre boyu ve
+// dikkate alinan en yuksek yuzey (tavan ve raf ustleri disarida kalsin).
+const HEIGHTFIELD_CELL = 0.04;   // metre
+const HEIGHTFIELD_MAX_Y = 1.9;   // metre
+const HEIGHTFIELD_MAX_CELLS = 400; // kenar basina (16 m)
+
 // Tum odayi kaplayan tarama agi tek kutu olunca odanin icini doldurur; atlanir.
 const MAX_FURNITURE_SIZE = 3.5;  // metre
 
@@ -1698,8 +1757,11 @@ function updateSurfaces(frame, time) {
   const meshes = frame.detectedMeshes;
   if (meshes) {
     for (const mesh of meshes) {
-      if (/global/i.test(mesh.semanticLabel || "")) continue;
       seen.add(mesh);
+      if (/global/i.test(mesh.semanticLabel || "")) {
+        syncRoomMesh(frame, refSpace, mesh);
+        continue;
+      }
       syncSurface(frame, refSpace, mesh, mesh.meshSpace, mesh.semanticLabel || "mobilya", () => meshBox(mesh));
     }
   }
@@ -1713,15 +1775,97 @@ function updateSurfaces(frame, time) {
   // Oda verisi yoksa model hep yere duser; kullaniciya sebebini soyle.
   if (!state.surfaceHintShown && time - state.sessionStart > 6000) {
     state.surfaceHintShown = true;
-    const { furniture, total } = surfaceCounts();
+    const { furniture, total, roomMesh } = surfaceCounts();
     // Oda taramasi olmasa da bakilan yuzeyler ogreniliyor; kullaniciya
     // fizigin nasil calistigini soyle.
-    if (furniture === 0) {
+    if (furniture === 0 && !roomMesh) {
       hud(total === 0 && !planes && !meshes
         ? "Fizik icin masaya/yuzeylere bir kez bak: gozluk onlari ogrenir"
         : "Masalara bir kez bak: fizik bakilan yuzeyleri ogrenir", 6000);
     }
   }
+}
+
+/**
+ * Quest 3'un tum oda tarama agini (global mesh) fizige katar. Fizik motoru
+ * kutu ile ucgen agini carpistiramiyor ama yukseklik haritasiyla (heightfield)
+ * carpistirabiliyor: yukari/asagi bakan her ucgen 4 cm'lik izgaraya
+ * rasterlanir, her hucreye o noktadaki en yuksek yuzey (masa ustu, koltuk
+ * oturagi, yatak) yazilir. Duvarlar ve masa alti gibi dikey/ters yuzeyler
+ * haritaya girmez; onlar icin duzlemler ve yamalar var.
+ */
+function syncRoomMesh(frame, refSpace, mesh) {
+  const known = state.surfaces.get(mesh);
+  if (known && known.changed === mesh.lastChangedTime) return;
+  const pose = frame.getPose(mesh.meshSpace, refSpace);
+  if (!pose) return;
+  if (known) removeSurface(known);
+  const entry = { body: null, debug: null, label: "oda agi", changed: mesh.lastChangedTime };
+  state.surfaces.set(mesh, entry);
+  entry.body = buildHeightfield(mesh.vertices, mesh.indices, pose.transform.matrix);
+  if (entry.body) state.world.addBody(entry.body);
+}
+
+function buildHeightfield(vertices, indices, matrix) {
+  if (!vertices || !indices || indices.length < 3) return null;
+  _pm.fromArray(matrix);
+  const count = vertices.length / 3;
+  const w = new Float32Array(vertices.length);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < count; i++) {
+    _ps.set(vertices[i * 3], vertices[i * 3 + 1], vertices[i * 3 + 2]).applyMatrix4(_pm);
+    w[i * 3] = _ps.x; w[i * 3 + 1] = _ps.y; w[i * 3 + 2] = _ps.z;
+    minX = Math.min(minX, _ps.x); maxX = Math.max(maxX, _ps.x);
+    minZ = Math.min(minZ, _ps.z); maxZ = Math.max(maxZ, _ps.z);
+  }
+  const es = HEIGHTFIELD_CELL;
+  const nx = Math.min(Math.ceil((maxX - minX) / es) + 1, HEIGHTFIELD_MAX_CELLS);
+  const nz = Math.min(Math.ceil((maxZ - minZ) / es) + 1, HEIGHTFIELD_MAX_CELLS);
+  if (nx < 2 || nz < 2) return null;
+  const heights = Array.from({ length: nx }, () => new Array(nz).fill(0));
+
+  // Hucre (i, j) dunyada x = minX + i*es, z = maxZ - j*es (govde -90° donuk).
+  for (let t = 0; t < indices.length; t += 3) {
+    const a = indices[t] * 3, b = indices[t + 1] * 3, c = indices[t + 2] * 3;
+    const ax = w[a], ay = w[a + 1], az = w[a + 2];
+    const bx = w[b], by = w[b + 1], bz = w[b + 2];
+    const cx = w[c], cy = w[c + 1], cz = w[c + 2];
+    if (ay > HEIGHTFIELD_MAX_Y && by > HEIGHTFIELD_MAX_Y && cy > HEIGHTFIELD_MAX_Y) continue;
+    // Yatay yakin ucgenler (normalin dikey bileseni buyuk); sarim yonu belirsiz, mutlak deger.
+    const ux = bx - ax, uy = by - ay, uz = bz - az;
+    const vx = cx - ax, vy = cy - ay, vz = cz - az;
+    const nX = uy * vz - uz * vy, nY = uz * vx - ux * vz, nZ = ux * vy - uy * vx;
+    const len = Math.hypot(nX, nY, nZ);
+    if (!len || Math.abs(nY) / len < 0.7) continue;
+
+    const denom = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+    if (Math.abs(denom) < 1e-12) continue;
+    const i0 = Math.max(0, Math.floor((Math.min(ax, bx, cx) - minX) / es));
+    const i1 = Math.min(nx - 1, Math.ceil((Math.max(ax, bx, cx) - minX) / es));
+    const j0 = Math.max(0, Math.floor((maxZ - Math.max(az, bz, cz)) / es));
+    const j1 = Math.min(nz - 1, Math.ceil((maxZ - Math.min(az, bz, cz)) / es));
+    for (let i = i0; i <= i1; i++) {
+      const x = minX + i * es;
+      for (let j = j0; j <= j1; j++) {
+        const z = maxZ - j * es;
+        const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / denom;
+        const l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / denom;
+        const l3 = 1 - l1 - l2;
+        if (l1 < -0.02 || l2 < -0.02 || l3 < -0.02) continue;
+        const y = l1 * ay + l2 * by + l3 * cy;
+        if (y <= HEIGHTFIELD_MAX_Y && y > heights[i][j]) heights[i][j] = y;
+      }
+    }
+  }
+
+  const body = new CANNON.Body({
+    type: CANNON.Body.STATIC,
+    shape: new CANNON.Heightfield(heights, { elementSize: es }),
+  });
+  body.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+  body.position.set(minX, 0, maxZ);
+  body.updateAABB();
+  return body;
 }
 
 function planeBox(plane) {
@@ -1856,13 +2000,17 @@ function learnSurface(matrix) {
 }
 
 function surfaceCounts() {
-  let total = 0, furniture = 0;
+  let total = 0, furniture = 0, roomMesh = false;
   for (const e of state.surfaces.values()) {
     if (!e.body) continue;
+    if (e.label === "oda agi") {
+      roomMesh = true;
+      continue;
+    }
     total++;
     if (e.label !== "duzlem") furniture++;
   }
-  return { total, furniture, patches: state.patches.length };
+  return { total, furniture, roomMesh, patches: state.patches.length };
 }
 
 // --- menu baglantisi --------------------------------------------------------
@@ -1972,6 +2120,8 @@ async function enterAR() {
 
   state.session = session;
   state.inputs = [];
+  state.occlusion = settings.depth ? new SoftOcclusion(state.renderer) : null;
+  if (state.occlusion) for (const mat of model.materials) state.occlusion.patch(mat);
   state.surfaces = new Map();
   state.patches = [];
   state.surfaceHintShown = false;
@@ -2023,6 +2173,7 @@ function onSessionEnd() {
   state.hitTestSource = null;
   state.menu = null;
   state.toast = null;
+  state.occlusion = null;
   el.enter.disabled = false;
   el.hint.textContent = "Oturum kapandi. Tekrar girebilirsin.";
   loadCatalog();
@@ -2096,6 +2247,7 @@ function onFrame(time, frame) {
   state.section.update();
   updateShadowAndDims();
   updateRuler();
+  state.occlusion?.update();
 
   state.renderer.render(state.scene, state.camera);
 }
