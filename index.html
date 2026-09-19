@@ -97,6 +97,25 @@
     </div>
   </section>
 
+  <section class="card" id="room-card">
+    <div class="card-head">
+      <h2>Birlikte</h2>
+      <span class="muted" id="room-status">Bagli degil</span>
+    </div>
+    <p class="room-code-big" id="room-code-big" hidden></p>
+    <div class="tool-row room-row">
+      <input type="text" id="room-name" placeholder="Adin" maxlength="24" autocomplete="nickname">
+      <button type="button" class="chip" id="room-create">Oda ac</button>
+    </div>
+    <div class="tool-row room-row">
+      <input type="text" id="room-code" placeholder="Oda kodu" maxlength="6" inputmode="numeric" pattern="[0-9]*">
+      <button type="button" class="chip" id="room-join">Katil</button>
+      <button type="button" class="chip" id="room-leave" hidden>Ayril</button>
+    </div>
+    <p class="muted">Ikiniz de ayni odaya girin (biriniz &ldquo;Oda ac&rdquo;, digeri kodla katilir). Gozlukte
+      menu &rarr; Oda &rarr; Hizala: ikiniz de ayni masanin once sol, sonra sag on kosesine dokunun.</p>
+  </section>
+
   <section class="card">
     <h2>2. Baslat</h2>
     <button id="enter-ar" disabled>Passthrough'a gir</button>

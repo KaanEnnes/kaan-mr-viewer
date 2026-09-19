@@ -318,3 +318,26 @@ footer { margin-top: 28px; }
   padding: 5px 8px;
 }
 #t-ruler-out { margin: 0; }
+
+/* --- Birlikte ---------------------------------------------------------------- */
+
+.room-row { margin-top: 10px; }
+.room-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+.room-code-big {
+  margin: 12px 0 0;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}

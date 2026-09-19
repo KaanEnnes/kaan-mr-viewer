@@ -201,8 +201,8 @@ export class WristMenu {
     const a = this.api.actions;
 
     // Sekmeler
-    const tabs = [["model", "Model"], ["list", "Liste"], ["tools", "Arac"], ["hands", "El"]];
-    const tw = (PX_W - 48 - 24) / 4;
+    const tabs = [["model", "Model"], ["list", "Liste"], ["tools", "Arac"], ["hands", "El"], ["room", "Oda"]];
+    const tw = (PX_W - 48 - 32) / 5;
     tabs.forEach(([id, label], i) => add({
       id: "tab-" + id, kind: "tab", label, active: this.tab === id,
       x: 24 + i * (tw + 8), y: 22, w: tw, h: 64,
@@ -213,6 +213,7 @@ export class WristMenu {
     if (this.tab === "model") this.layoutModel(add, a, top);
     else if (this.tab === "list") this.layoutList(add, a, top);
     else if (this.tab === "tools") this.layoutTools(add, a, top);
+    else if (this.tab === "room") this.layoutRoom(add, a, top);
     else this.layoutHands(add, a, top);
 
     this.items = items;
@@ -377,6 +378,61 @@ export class WristMenu {
     // Ortme oturum baslarken istenir; degisiklik sonraki giriste gecerli.
     add({ id: "depth", kind: "toggle", label: s.depth ? "Acik (sonraki giris)" : "Kapali", active: s.depth,
       x: 300, y, w: R - 300, h, onPress: () => a.setSetting("depth", !s.depth) });
+  }
+
+  /**
+   * Oda: durum, oda ac / ayril, hizala ve kodla katilmak icin tus takimi.
+   */
+  layoutRoom(add, a, top) {
+    const r = this.api.room();
+    const L = 24, R = PX_W - 24, h = 58;
+    const half = (R - L - 12) / 2;
+    const connected = r.status === "bagli";
+    this.roomCode = this.roomCode || "";
+
+    const status = connected
+      ? `Oda ${r.code} · ${r.peers.length ? r.peers.join(", ") : "tek basina"}`
+      : r.status === "baglaniyor" ? `Oda ${r.code}: baglaniyor…` : "Bagli degil";
+    add({ id: "room-status", kind: "title", label: status, x: L, y: top, w: R - L, h: 44 });
+    let y = top + 56;
+
+    if (connected) {
+      add({ id: "room-calib", kind: "toggle",
+        label: r.calibrating ? `Hizalama: ${r.calibrating}. noktaya dokun` : r.calibrated ? "Hizali (tekrar)" : "Hizala",
+        active: r.calibrated || Boolean(r.calibrating), x: L, y, w: half, h, onPress: a.roomCalibrate });
+      add({ id: "room-leave", kind: "button", label: "Ayril", danger: true,
+        x: L + half + 12, y, w: half, h, onPress: a.roomLeave });
+      y += h + 14;
+      const help = [
+        "Hizala: ikiniz de ayni masanin once SOL,",
+        "sonra SAG on kosesine dokunun (cimdik).",
+        "Boylece modeller ikinizde ayni yerde durur.",
+      ];
+      help.forEach((line, i) => add({ id: "rh" + i, kind: "text", label: line, x: L, y: y + i * 32, w: R - L, h: 30 }));
+      return;
+    }
+
+    add({ id: "room-create", kind: "button", label: "Oda ac", x: L, y, w: R - L, h, onPress: a.roomCreate });
+    y += h + 12;
+    add({ id: "room-code", kind: "value", label: this.roomCode ? `Kod: ${this.roomCode}` : "Kodla katil:", x: L, y, w: R - L, h: 44 });
+    y += 50;
+    const kw = (R - L - 24) / 3;
+    const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "Sil", "0", "Katil"];
+    keys.forEach((k, i) => {
+      const col = i % 3;
+      const row = Math.floor(i / 3);
+      add({
+        id: "key-" + k, kind: k === "Katil" ? "toggle" : "button", label: k,
+        active: k === "Katil" && this.roomCode.length >= 4,
+        x: L + col * (kw + 12), y: y + row * (h + 8), w: kw, h,
+        onPress: () => {
+          if (k === "Sil") this.roomCode = this.roomCode.slice(0, -1);
+          else if (k === "Katil") {
+            if (this.roomCode.length >= 4) a.roomJoin(this.roomCode);
+          } else if (this.roomCode.length < 6) this.roomCode += k;
+        },
+      });
+    });
   }
 
   layoutHands(add, a, top) {

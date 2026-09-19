@@ -21,6 +21,7 @@ import { splitDisconnected } from "./split.js";
 import { parse3mf, MF_UNITS } from "./threemf.js";
 import { SoftOcclusion } from "./occlusion.js";
 import { initDesktop } from "./desktop.js";
+import { initMulti } from "./multi.js";
 import { Label, ShadowCatcher, Ruler, TechDetail, Section, SECTION_MODES, WristButton } from "./tools.js";
 
 // --- sabitler ---------------------------------------------------------------
@@ -119,8 +120,9 @@ const state = {
 
 const handFactory = new XRHandModelFactory();
 
-// PC goruntuleyicisi (desktop.js); baslangicta kurulur.
+// PC goruntuleyicisi (desktop.js) ve ortak oda (multi.js); baslangicta kurulur.
 let desktop = null;
+let multi = null;
 
 const el = {
   xrDot: document.getElementById("xr-dot"),
@@ -853,6 +855,7 @@ async function spawnModel(entry) {
     bodies: [], opacity: 1, realistic: false, physics: false,
     explode: 0, explodeTarget: 0, anim,
     anchor: null, anchorApplied: false, anchorScale: 1,
+    uid: Math.random().toString(36).slice(2, 10),
     entry,
   };
 }
@@ -958,6 +961,35 @@ function modelAt(point) {
     if (box.containsPoint(point)) return m;
   }
   return null;
+}
+
+/** Herhangi bir modeli sahneden kaldirir (oda esitlemesi icin). */
+function removeModel(m) {
+  if (state.grab && state.model === m) releaseAll();
+  const i = state.models.indexOf(m);
+  if (i === -1) return;
+  state.models.splice(i, 1);
+  if (state.model === m) state.model = null;
+  disposeModel(m);
+  if (!state.model && state.models.length) setActive(state.models[state.models.length - 1]);
+  desktop?.refresh();
+  state.menu?.invalidate();
+}
+
+/** Odadaki bir modeli yukleyip sahneye ekler (secili model degismez). */
+async function addRemoteModel(entry, uid) {
+  const m = await spawnModel(entry);
+  m.uid = uid;
+  state.models.push(m);
+  state.scene.add(m.holder);
+  m.realistic = !state.session;
+  setOpacityFor(m, state.session ? GHOST_OPACITY : 1);
+  if (!state.model) {
+    setActive(m);
+    if (!state.session) desktop?.onModel(m);
+  }
+  state.menu?.invalidate();
+  return m;
 }
 
 function removeActiveModel() {
@@ -1108,7 +1140,10 @@ function liftAboveFloor() {
 // --- gorunum ----------------------------------------------------------------
 
 function setOpacity(value) {
-  const m = state.model;
+  setOpacityFor(state.model, value);
+}
+
+function setOpacityFor(m, value) {
   if (!m) return;
   m.opacity = Math.min(1, Math.max(0, value));
   const see = m.opacity < 0.999;
@@ -1804,6 +1839,10 @@ function onSelect(input) {
     state.menu.clickAt(hit);
     return;
   }
+  if (multi.calibrating) {
+    multi.capturePoint(input.controller.getWorldPosition(new THREE.Vector3()));
+    return;
+  }
   if (settings.tech) {
     toggleTech(partOnRay(input));
     return;
@@ -1891,6 +1930,10 @@ function updateHand(input, time) {
 }
 
 function onPinchStart(input) {
+  if (multi.calibrating) {
+    multi.capturePoint(input.tip);
+    return;
+  }
   if (settings.tech) {
     toggleTech(partAt(input.tip));
     return;
@@ -2479,6 +2522,7 @@ function buildMenu() {
     },
     catalog: () => state.catalog,
     currentUrl: () => state.model?.entry.url,
+    room: () => multi.info(),
     settings: () => settings,
     tools: () => ({
       exploded: Boolean(state.model && state.model.explodeTarget > 0),
@@ -2525,6 +2569,10 @@ function buildMenu() {
       sectionStep,
       saveAnchor: requestAnchorSave,
       animToggle: toggleAnimation,
+      roomCreate: () => multi.create(),
+      roomJoin: (code) => multi.connect(code),
+      roomLeave: () => multi.leave(),
+      roomCalibrate: () => multi.startCalibration(),
       animRestart: () => seekAnimation(0),
       forgetAnchor,
     },
@@ -2599,6 +2647,7 @@ async function enterAR() {
   state.ruler.clear();
   state.anchorRequest = null;
   state.menuOpen = false;
+  multi.sessionStarted();
 
   buildMenu();
   setUpInputs();
@@ -2641,8 +2690,9 @@ function onSessionEnd() {
   state.hitTestSource = null;
   el.enter.disabled = false;
   el.hint.textContent = "Oturum kapandi. Tekrar girebilirsin.";
+  multi.sessionEnded();
   desktop.resume();
-  state.renderer.setAnimationLoop(desktop.frame);
+  state.renderer.setAnimationLoop(desktopLoop);
   loadCatalog();
 }
 
@@ -2717,9 +2767,43 @@ function onFrame(time, frame) {
   updateShadowAndDims();
   updateRuler();
   state.tech.update(_headPos, realScaleOf);
+  multi.update(time);
   state.occlusion?.update();
 
   state.renderer.render(state.scene, state.camera);
+}
+
+// --- birlikte (sayfadaki kart) -------------------------------------------------
+
+function desktopLoop(time) {
+  desktop.frame(time);
+  multi.update(time);
+}
+
+function wireRoomCard() {
+  const $ = (id) => document.getElementById(id);
+  $("room-name").value = multi.getName();
+  $("room-create").addEventListener("click", () => multi.create($("room-name").value.trim()));
+  const join = () => multi.connect($("room-code").value.trim(), $("room-name").value.trim());
+  $("room-join").addEventListener("click", join);
+  $("room-code").addEventListener("keydown", (e) => { if (e.key === "Enter") join(); });
+  $("room-leave").addEventListener("click", () => multi.leave());
+  renderRoomCard();
+}
+
+function renderRoomCard() {
+  const $ = (id) => document.getElementById(id);
+  const r = multi.info();
+  const connected = r.status === "bagli";
+  $("room-status").textContent = connected
+    ? `Oda ${r.code} · ${r.peers.length ? r.peers.join(", ") + " ile" : "tek basina"}`
+    : r.status === "baglaniyor" ? `Oda ${r.code}: baglaniyor…` : "Bagli degil";
+  $("room-code-big").textContent = connected ? r.code : "";
+  $("room-code-big").hidden = !connected;
+  $("room-leave").hidden = !connected;
+  $("room-create").hidden = connected;
+  $("room-join").hidden = connected;
+  $("room-code").hidden = connected;
 }
 
 // --- baslangic --------------------------------------------------------------
@@ -2736,7 +2820,24 @@ desktop = initDesktop({
   restoreHome, applyExplode, realScaleOf, clearMeasurements, applyIsolation,
   fitScaleOf: (m) => (m.longest > DEFAULT_SIZE ? DEFAULT_SIZE / m.longest : 1),
 });
-state.renderer.setAnimationLoop(desktop.frame);
+multi = initMulti({
+  state, hud, removeModel, addRemoteModel, removeBodies, setExplode, applySection,
+  setModelLook: (m, op, real) => {
+    m.realistic = real;
+    setOpacityFor(m, op);
+  },
+  refreshUi: () => {
+    desktop?.refresh();
+    state.menu?.invalidate();
+  },
+  headPos: () => _headPos,
+});
+multi.onChange(() => {
+  renderRoomCard();
+  state.menu?.invalidate();
+});
+wireRoomCard();
+state.renderer.setAnimationLoop(desktopLoop);
 // ?debug: tarayici konsolundan duruma bakabilmek icin.
 if (DEBUG) window.__viewer = { state, settings, THREE };
 
