@@ -112,12 +112,13 @@ export function initDesktop(api) {
   function info() {
     const m = state.model;
     if (!m) return "";
-    const size = m.localBox.getSize(new THREE.Vector3())
-      .multiplyScalar(m.root.scale.x * m.holder.scale.x * 100);
-    const f = (v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
+    // Gercek boyut (1:1); gosterilen olcek ayrica yazilir.
+    const real = m.localBox.getSize(new THREE.Vector3()).multiplyScalar(m.root.scale.x);
+    const metres = Math.max(real.x, real.y, real.z) >= 1;
+    const f = (v) => (metres ? v.toFixed(2) : v * 100 >= 10 ? (v * 100).toFixed(0) : (v * 100).toFixed(1));
     const scale = Math.round(m.holder.scale.x * 100);
-    return `${m.parts.length} parca · ${f(size.x)} × ${f(size.z)} × ${f(size.y)} cm`
-      + (scale === 100 ? " · gercek boyut" : ` · %${scale} boyut`);
+    return `${m.parts.length} parca · gercek ${f(real.x)} × ${f(real.z)} × ${f(real.y)} ${metres ? "m" : "cm"}`
+      + (scale === 100 ? " · 1:1" : ` · %${scale} gosteriliyor`);
   }
 
   function refresh() {

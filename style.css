@@ -276,6 +276,7 @@ footer { margin-top: 28px; }
   font-size: 14px;
   pointer-events: none;
 }
+.viewer-empty[hidden] { display: none; } /* display:grid, hidden'i ezmesin */
 .viewer-info { font-size: 13px; text-align: right; }
 
 .viewer-tools { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
