@@ -2675,6 +2675,8 @@ desktop = initDesktop({
   fitScaleOf: (m) => (m.longest > DEFAULT_SIZE ? DEFAULT_SIZE / m.longest : 1),
 });
 state.renderer.setAnimationLoop(desktop.frame);
+// ?debug: tarayici konsolundan duruma bakabilmek icin.
+if (DEBUG) window.__viewer = { state, settings, THREE };
 
 checkSupport();
 loadCatalog();
