@@ -440,6 +440,7 @@ const SETTINGS_STORAGE = "kaan-mr-viewer.settings";
 const DEFAULT_SETTINGS = {
   throw: true, push: true, handStyle: "tips", pinch: "normal",
   shadow: true, dims: false, ruler: false, tech: false, depth: false, listMode: "replace",
+  pinchPlace: true, farGrab: true,
 };
 
 // Cimdik baslangic / bitis mesafeleri (basparmak ucu - isaret parmagi ucu).
@@ -469,6 +470,7 @@ function setSetting(key, value) {
   settings[key] = value;
   saveSettings();
   if (key === "handStyle") for (const input of state.inputs) applyHandStyle(input);
+  if (key === "farGrab") for (const input of state.inputs) showRay(input);
   if (key === "push" && !value) removeFingerBodies();
   // Cetvel ve teknik detay ayni dokunusu kullanir: biri acilinca digeri kapanir.
   if (key === "ruler" && value) settings.tech = false;
@@ -487,6 +489,8 @@ function setSetting(key, value) {
     dims: `Olculer ${onOff}`,
     ruler: value ? "Cetvel: iki noktaya cimdik / tetik (olcumler yerinde kalir)" : "Cetvel kapali",
     tech: value ? "Teknik detay: olculerini gormek istedigin parcaya dokun" : "Teknik detay kapali",
+    pinchPlace: value ? "Cimdik bakilan yere yerlestirir" : "Cimdikle yerlestirme kapali",
+    farGrab: value ? "Uzaktan tutma: isin modeldeyken cimdik" : "Uzaktan tutma kapali",
     depth: value ? "Gercek nesne ortme sonraki giriste acilir" : "Ortme sonraki giriste kapanir",
     listMode: value === "add" ? "Listeden secilen model sahneye eklenir" : "Listeden secilen model degistirilir",
   };
@@ -1168,15 +1172,37 @@ function togglePhysics() {
     const { total, furniture, patches, roomMesh } = surfaceCounts();
     hud(`Fizik acik · ${roomMesh ? "oda agi, " : ""}${furniture} mobilya, ${total - furniture} duzlem, ${patches} yama`, 3000);
   } else {
+    rebaseHolder(m);
     hud("Fizik kapali");
   }
   state.menu?.invalidate();
+}
+
+/**
+ * Modelin tutamagini (olcekleme / dondurme merkezi) parcalarin o anki
+ * tabaninin ortasina tasir; parcalar dunyada yerinde kalir. Fizikte parcalar
+ * yere duserken tutamak havada kaliyordu; sonra olcekleme o havadaki merkeze
+ * gore yapilinca parcalar zeminin altina itiliyordu.
+ */
+function rebaseHolder(m) {
+  if (!m || m.holder.parent !== state.scene) return; // tutulurken dokunma
+  m.holder.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(m.root);
+  if (box.isEmpty()) return;
+  const target = new THREE.Vector3((box.min.x + box.max.x) / 2, box.min.y, (box.min.z + box.max.z) / 2);
+  if (target.distanceTo(m.holder.position) < 1e-4) return;
+  const children = [...m.holder.children];
+  for (const c of children) state.scene.attach(c);
+  m.holder.position.copy(target);
+  m.holder.updateMatrixWorld(true);
+  for (const c of children) m.holder.attach(c);
 }
 
 /** Olcegi ayarlar; mevcut fizik govdeleri eski boyutta kaldigi icin yenilenir. */
 function setScale(s) {
   const m = state.model;
   if (!m) return;
+  rebaseHolder(m);
   m.holder.scale.setScalar(Math.min(10, Math.max(0.01, s)));
   if (m.bodies.length) removeBodies();
   state.menu?.invalidate();
@@ -1707,7 +1733,7 @@ function setUpInputs() {
       input.pinching = false;
       input.prev = {};
       input.vel.clear();
-      ray.visible = !input.isHand;
+      showRay(input);
       applyHandStyle(input);
     });
     controller.addEventListener("disconnected", () => {
@@ -1745,6 +1771,31 @@ function applyHandStyle(input) {
   });
 }
 
+/**
+ * Kumandada isin hep gorunur; elde yalnizca uzaktan tutma aciksa (Quest'in
+ * el isini, bilekten ileri) daha soluk ve kisa.
+ */
+function showRay(input) {
+  input.ray.visible = !input.isHand || settings.farGrab;
+  input.ray.scale.z = input.isHand ? 1.5 : 3;
+  input.ray.material.opacity = input.isHand ? 0.3 : 0.6;
+}
+
+/** Isinin (kumanda ya da el) degdigi model. */
+function modelOnRay(input) {
+  input.controller.getWorldPosition(_v);
+  input.controller.getWorldDirection(_v2).negate();
+  _techRay.set(_v, _v2);
+  _techRay.far = 8;
+  const hits = _techRay.intersectObjects(state.models.map((m) => m.holder), true);
+  for (const h of hits) {
+    if (!h.object.isMesh || !h.object.visible) continue;
+    const m = state.models.find((x) => x.parts.includes(h.object));
+    if (m) return m;
+  }
+  return null;
+}
+
 /** Tetik (kumanda) — el takibinde select olayini kendi cimdik mantigimiz karsilar. */
 function onSelect(input) {
   if (input.isHand) return;
@@ -1761,7 +1812,7 @@ function onSelect(input) {
     addRulerPoint(input);
     return;
   }
-  placeAtReticle();
+  if (settings.pinchPlace) placeAtReticle();
 }
 
 function menuRayHit(input) {
@@ -1852,7 +1903,14 @@ function onPinchStart(input) {
   if (target) {
     if (!state.grab) setActive(target);
     if (target === state.model) grabWith(input);
-  } else if (!state.grab) {
+    return;
+  }
+  if (state.grab) return;
+  const far = settings.farGrab && modelOnRay(input);
+  if (far) {
+    setActive(far);
+    grabWith(input, true);
+  } else if (settings.pinchPlace) {
     placeAtReticle();
   }
   // Model bir eldeyken diger elin uzaktaki cimdigi yok sayilir: eskiden
@@ -1900,7 +1958,7 @@ function updateController(input, dt, time) {
 
   // Kavrama: kumandanin yanindaki model (yoksa secili olan) kumandaya baglanir.
   if (grip && !prev.grip) {
-    const target = modelAt(input.point);
+    const target = modelAt(input.point) || (settings.farGrab && modelOnRay(input));
     if (target && !state.grab) setActive(target);
     grabWith(input);
   }
@@ -1917,7 +1975,7 @@ function anchorOf(input) {
   return input.isHand ? input.pinchAnchor : input.grip;
 }
 
-function grabWith(input) {
+function grabWith(input, far = false) {
   const m = state.model;
   if (!m) return;
   if (state.grab && state.grab.input !== input && !state.twoHand) {
@@ -1926,16 +1984,19 @@ function grabWith(input) {
   }
   if (state.grab) return;
 
-  state.grab = { input, wasPhysics: m.physics };
+  rebaseHolder(m);
+  state.grab = { input, wasPhysics: m.physics, far };
   // Tutulurken fizik duraklar; birakinca govdeler yeni yerden kurulur.
   m.physics = false;
-  anchorOf(input).attach(m.holder);
-  hud("Tutuluyor", 900);
+  // Uzaktan tutmada model elin isinina baglanir: el hareket edince isinla gider.
+  (far ? input.controller : anchorOf(input)).attach(m.holder);
+  hud(far ? "Uzaktan tutuluyor" : "Tutuluyor", 900);
 }
 
 function startTwoHand(a, b) {
   const m = state.model;
   state.scene.attach(m.holder);
+  rebaseHolder(m);
   const mid = new THREE.Vector3().addVectors(a.point, b.point).multiplyScalar(0.5);
   state.twoHand = {
     a, b,

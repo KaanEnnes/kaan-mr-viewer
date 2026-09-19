@@ -398,6 +398,8 @@ export class WristMenu {
       y += row;
     };
 
+    toggle("pinchPlace", "Cimdikle yerlestir", s.pinchPlace, "pinchPlace");
+    toggle("farGrab", "Uzaktan tutma", s.farGrab, "farGrab");
     toggle("throw", "Firlatma", s.throw, "throw");
     toggle("push", "Parmakla itme", s.push, "push");
     cycle("style", "El gorunumu",
@@ -406,10 +408,8 @@ export class WristMenu {
       s.pinch, "pinch");
 
     const help = [
-      "Cimdik (bosluga): bakilan yere koy",
-      "Cimdik (model yaninda): tut, tasi",
+      "Isin modeldeyken cimdik: uzaktan tut",
       "Iki elle cimdik: boyut + dondur",
-      "Sol bilek dugmesi / Y tusu: menu",
     ];
     y += 6;
     for (const [i, line] of help.entries()) {
