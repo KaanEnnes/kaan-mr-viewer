@@ -55,6 +55,7 @@ export function initMulti(api) {
     lastSent: new Map(),    // uid -> iz (string)
     lastStructure: "",
     lastSection: "",
+    lastMeasure: "",
     lastState: 0,
     lastPose: 0,
     lastScene: 0,
@@ -148,6 +149,7 @@ export function initMulti(api) {
     m.code = "";
     m.lastSent.clear();
     m.lastStructure = "";
+    m.lastMeasure = "";
     for (const model of state.models) model.synced = false;
     if (had && !silent) api.hud("Odadan ayrildin");
     changed();
@@ -190,6 +192,8 @@ export function initMulti(api) {
       m.peers.get(msg.from)?.avatar.update(msg, m.fromShared);
     } else if (msg.t === "scene") {
       applyScene(msg.scene, false);
+    } else if (msg.t === "meas") {
+      applyMeasures(msg.data);
     } else if (msg.t === "state") {
       if (msg.sec) applySection(msg.sec);
       for (const st of msg.models || []) {
@@ -253,6 +257,7 @@ export function initMulti(api) {
         ...modelState(model, withPose), entry: entryOf(model),
       })),
       sec: [state.sectionMode, r3(state.sectionT)],
+      meas: api.serializeMeasures(m.toShared, withPose),
     };
   }
 
@@ -300,6 +305,14 @@ export function initMulti(api) {
         send({ t: "state", models: changedModels, sec: secChanged ? [state.sectionMode, r3(state.sectionT)] : undefined });
         m.sceneDirty = true;
       }
+    }
+
+    // Cetveller ve teknik detay secimleri: degisince hepsi birden.
+    const meas = JSON.stringify(api.serializeMeasures(m.toShared, withPose));
+    if (meas !== m.lastMeasure) {
+      m.lastMeasure = meas;
+      send({ t: "meas", data: JSON.parse(meas) });
+      m.sceneDirty = true;
     }
 
     // Sunucudaki tam sahne ara ara tazelenir (sonradan katilan icin).
@@ -374,6 +387,15 @@ export function initMulti(api) {
       }
     }
     m.lastStructure = state.models.filter(shareable).map((x) => `${x.uid}:${x.entry.url}`).join("|");
+    // Olcumler modellere bagli: modeller yuklendikten sonra.
+    if (scene.meas) applyMeasures(scene.meas);
+  }
+
+  function applyMeasures(data) {
+    const withWorld = Boolean(state.session);
+    api.loadMeasures(data, m.fromShared, withWorld);
+    // Yeni hal "gonderilmis" sayilir: yanki olmasin.
+    m.lastMeasure = JSON.stringify(api.serializeMeasures(m.toShared, withWorld));
   }
 
   function applySection(sec) {
@@ -469,8 +491,9 @@ export function initMulti(api) {
     m.calibrated = true;
     m.calibrating = null;
     setTimeout(() => markers.clear(), 3000);
-    // Hizalanan taraf odanin sahnesini yeniden ister gibi: son durumu uygula.
+    // Hizalanan taraf son durumunu yeniden gonderir (artik ortak uzayda).
     m.lastSent.clear();
+    m.lastMeasure = "";
     api.hud(m.peers.size ? "Hizalandi: modeller ikinizde ayni yerde" : "Hizalandi", 3000);
     changed();
     return true;

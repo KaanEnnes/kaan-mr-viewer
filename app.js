@@ -1611,6 +1611,29 @@ function toggleTech(part) {
   state.menu?.invalidate();
 }
 
+// --- olcumlerin odada paylasimi ----------------------------------------------------
+
+function serializeMeasures(toShared, withWorld) {
+  const uidOf = (holder) => state.models.find((x) => x.holder === holder)?.uid;
+  const locate = (part) => {
+    const model = state.models.find((x) => x.parts.includes(part));
+    return model ? [model.uid, model.parts.indexOf(part)] : null;
+  };
+  return {
+    rulers: state.ruler.serialize(toShared, withWorld, uidOf),
+    tech: state.tech.serialize(locate),
+  };
+}
+
+function loadMeasures(data, fromShared, withWorld) {
+  const byUid = (uid) => state.models.find((x) => x.uid === uid);
+  state.ruler.load(data.rulers, fromShared, withWorld, (uid) => byUid(uid)?.holder);
+  state.tech.load(data.tech, (uid, i) => byUid(uid)?.parts[i]);
+  applyIsolation();
+  state.menu?.invalidate();
+  desktop?.refresh();
+}
+
 function clearMeasurements() {
   state.ruler.clear();
   state.tech.clear();
@@ -2822,6 +2845,7 @@ desktop = initDesktop({
 });
 multi = initMulti({
   state, hud, removeModel, addRemoteModel, removeBodies, setExplode, applySection,
+  serializeMeasures, loadMeasures,
   setModelLook: (m, op, real) => {
     m.realistic = real;
     setOpacityFor(m, op);

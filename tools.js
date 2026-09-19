@@ -209,14 +209,60 @@ export class Ruler {
     this.points.push(p.clone());
     this.pointHolders.push(holder);
     if (this.points.length < 2) return null;
-    const m = new Measurement(this.scene);
-    m.set(this.points[0], this.points[1]);
     const [h0, h1] = this.pointHolders;
-    if (h0 && h0 === h1) m.stickTo(h0);
-    this.done.push(m);
+    const m = this.addMeasurement(this.points[0], this.points[1], h0 && h0 === h1 ? h0 : null);
     this.points = [];
     this.pointHolders = [];
     return m;
+  }
+
+  /** Dunya noktalariyla hazir olcum ekler; holder verilirse o modele yapisir. */
+  addMeasurement(a, b, holder = null) {
+    const m = new Measurement(this.scene);
+    m.set(a, b);
+    if (holder) m.stickTo(holder);
+    this.done.push(m);
+    return m;
+  }
+
+  /**
+   * Odada paylasmak icin. Modele yapisik olcum modelin kendi (tutucu)
+   * ekseninde: hizalamadan bagimsiz, iki tarafta da modelin ayni yerinde.
+   * Serbest olcum ortak uzayda (toShared); withWorld yoksa (PC) gonderilmez.
+   */
+  serialize(toShared, withWorld, uidOf) {
+    const r4 = (v) => [v.x, v.y, v.z].map((n) => Math.round(n * 1e4) / 1e4);
+    const out = [];
+    for (const m of this.done) {
+      const a = m.dots[0].getWorldPosition(new THREE.Vector3());
+      const b = m.dots[1].getWorldPosition(new THREE.Vector3());
+      if (m.holder) {
+        const uid = uidOf(m.holder);
+        if (!uid) continue;
+        m.holder.updateMatrixWorld(true);
+        out.push({ uid, a: r4(m.holder.worldToLocal(a)), b: r4(m.holder.worldToLocal(b)) });
+      } else if (withWorld) {
+        out.push({ a: r4(a.applyMatrix4(toShared)), b: r4(b.applyMatrix4(toShared)) });
+      }
+    }
+    return out;
+  }
+
+  /** Odadan gelen olcumlerle degistirir (yarim kalan olcum iptal olur). */
+  load(list, fromShared, withWorld, holderOf) {
+    this.clear();
+    for (const r of list || []) {
+      const a = new THREE.Vector3(...r.a);
+      const b = new THREE.Vector3(...r.b);
+      if (r.uid) {
+        const holder = holderOf(r.uid);
+        if (!holder) continue;
+        holder.updateMatrixWorld(true);
+        this.addMeasurement(holder.localToWorld(a), holder.localToWorld(b), holder);
+      } else if (withWorld) {
+        this.addMeasurement(a.applyMatrix4(fromShared), b.applyMatrix4(fromShared));
+      }
+    }
   }
 
   clear() {
@@ -306,6 +352,20 @@ export class TechDetail {
 
   clear() {
     for (const part of [...this.items.keys()]) this.remove(part);
+  }
+
+  /** Odada paylasmak icin: [model uid, parca sirasi] listesi. */
+  serialize(locate) {
+    return [...this.items.keys()].map(locate).filter(Boolean);
+  }
+
+  /** Odadan gelen secimle degistirir. */
+  load(list, partOf) {
+    this.clear();
+    for (const [uid, index] of list || []) {
+      const part = partOf(uid, index);
+      if (part) this.toggle(part);
+    }
   }
 
   /** realScale(part): dunya metresini gercek metreye ceviren bolen (modelin gosterim olcegi). */
