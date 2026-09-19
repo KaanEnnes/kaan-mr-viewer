@@ -10,9 +10,9 @@ import { ThreeMFLoader } from "three/addons/loaders/3MFLoader.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 import * as CANNON from "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js";
 import {
-  INDEX_TIP, THUMB_TIP, jointWorld, palmNormal, palmCentre, VelocityTracker, HandOccluder,
+  INDEX_TIP, THUMB_TIP, jointWorld, palmNormal, VelocityTracker, HandOccluder,
 } from "./hands.js";
-import { WristMenu } from "./menu.js";
+import { WristMenu, MENU_WIDTH } from "./menu.js";
 import { splitDisconnected } from "./split.js";
 import { parse3mf, MF_UNITS } from "./threemf.js";
 import { SoftOcclusion } from "./occlusion.js";
@@ -99,6 +99,7 @@ const state = {
   dimsLabel: null,
   wristButton: null,
   anchorRequest: null,
+  menuOpen: false,
   lastTime: 0,
 };
 
@@ -1204,35 +1205,52 @@ function updateRuler() {
 
 // --- menu acma (sol bilek dugmesi / Y) ---------------------------------------
 
-/**
- * Menuyu acar/kapatir. Acilinca sag elin (ya da sag kumandanin) yaninda
- * belirir ve orada sabit kalir: el hareket etse de kacmaz, iki elle de
- * dokunulabilir.
- */
+/** Menuyu acar/kapatir; yeri her karede sol bilege gore updateMenuFollow'da. */
 function toggleMenu() {
+  state.menuOpen = !state.menuOpen;
+  if (!state.menuOpen) state.menu.setVisible(false);
+}
+
+const _toFingers = new THREE.Vector3();
+const _wristPos = new THREE.Vector3();
+const _knuckle = new THREE.Vector3();
+const _palm = new THREE.Vector3();
+
+/**
+ * Acik menu sol bilekte saat gibi durur ve kolla birlikte hareket eder:
+ * el takibinde ic on kolun ustunde (bilegin gerisinde), kumandada sol
+ * kumandanin ustunde. Sag parmak ya da isin menudeyken panel donar; kol
+ * titrese de dokunulan dugme kacmaz. Sol el gorunmuyorsa menu gizlenir.
+ */
+function updateMenuFollow() {
   const menu = state.menu;
-  if (menu.visible) {
+  if (!state.menuOpen) return;
+  const left = state.inputs.find((i) => i.source && i.handedness === "left" && i.tracked);
+  if (!left) {
     menu.setVisible(false);
     return;
   }
-  const right = state.inputs.find((i) => i.source && i.handedness === "right" && i.tracked);
-  if (right) {
-    const base = right.isHand
-      ? (palmCentre(right.hand, _centre) || _centre.copy(right.point))
-      : right.grip.getWorldPosition(_centre);
-    menu.group.position.copy(base);
-    menu.group.position.y += 0.2;
-    // Biraz kullaniciya dogru: el ile yuz arasinda rahat bir uzaklik.
-    menu.group.position.lerp(_headPos, 0.15);
+  const wasHidden = !menu.visible;
+  menu.setVisible(true);
+  const using = state.inputs.some((i) => i.pokingMenu)
+    || state.inputs.some((i) => i.source && !i.isHand && menuRayHit(i));
+  if (using && !wasHidden) return;
+
+  if (left.isHand) {
+    const wrist = jointWorld(left.hand, "wrist", _wristPos);
+    const knuckle = wrist && jointWorld(left.hand, "middle-finger-phalanx-proximal", _knuckle);
+    const normal = knuckle && palmNormal(left.hand, "left", _palm);
+    if (!normal) return;
+    _toFingers.subVectors(knuckle, wrist).normalize();
+    // Panelin yakin kenari bilek dugmesinin hemen gerisinde kalsin.
+    menu.group.position.copy(wrist)
+      .addScaledVector(_toFingers, -(0.06 + MENU_WIDTH * 0.6))
+      .addScaledVector(normal, 0.04);
   } else {
-    state.renderer.xr.getCamera().getWorldDirection(_v2);
-    _v2.y = 0;
-    _v2.normalize();
-    menu.group.position.copy(_headPos).addScaledVector(_v2, 0.45);
-    menu.group.position.y -= 0.15;
+    left.grip.getWorldPosition(menu.group.position);
+    menu.group.position.y += 0.17;
   }
   menu.group.lookAt(_headPos);
-  menu.setVisible(true);
 }
 
 let _wristShown = false;
@@ -2146,6 +2164,7 @@ async function enterAR() {
   state.scene.add(state.dimsLabel.mesh);
   state.wristButton = new WristButton(state.scene);
   state.anchorRequest = null;
+  state.menuOpen = false;
 
   buildMenu();
   setUpInputs();
@@ -2221,6 +2240,7 @@ function onFrame(time, frame) {
   }
   if (state.twoHand) updateTwoHand();
   updateWristButton();
+  updateMenuFollow();
   updateMenuHover();
   state.menu.update();
   if (DEBUG && time - (state.lastDebug || 0) > 400) {
