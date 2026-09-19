@@ -74,7 +74,8 @@ const state = {
   toast: null,
   needsPlacement: false,
   loading: false,
-  surfaces: new Map(),  // XRPlane -> { body, changed }
+  surfaces: new Map(),  // XRPlane/XRMesh -> { body, changed }
+  patches: [],          // hit-test'ten ogrenilen yuzey yamalari
   surfaceHintShown: false,
   debugText: "",
   menuPinned: false,
@@ -427,6 +428,9 @@ function buildWorld() {
   const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
   world.solver.iterations = 14;
   world.allowSleep = true;
+  // Yuzlerce sabit yuzey yamasi olabiliyor; varsayilan broadphase tum ciftleri
+  // dener, SAP eksen boyunca siralayip yalnizca komsulari.
+  world.broadphase = new CANNON.SAPBroadphase(world);
 
   // Gercek zemin: local-floor referansinda y=0 kullanicinin durdugu zemindir,
   // yani sanal nesneler gercekten odanin zeminine duser.
@@ -745,8 +749,8 @@ function togglePhysics() {
     buildBodies();
   }
   if (m.physics) {
-    const { total, furniture } = surfaceCounts();
-    hud(total ? `Fizik acik · ${furniture} mobilya, ${total - furniture} duzlem` : "Fizik acik · oda taramasi yok");
+    const { total, furniture, patches } = surfaceCounts();
+    hud(`Fizik acik · ${patches} yuzey yamasi, ${furniture} mobilya, ${total - furniture} duzlem`, 3000);
   } else {
     hud("Fizik kapali");
   }
@@ -1295,6 +1299,13 @@ const _pp = new THREE.Vector3();
 const _pq = new THREE.Quaternion();
 const _ps = new THREE.Vector3();
 
+// Bakilan yuzeylerden (hit-test) ogrenilen fizik yamalari. Oda taramasi bos
+// olsa bile model yerlestirilebildigi her yuzeyde fizikte de durur.
+const PATCH_SIZE = 0.22;        // yamanin kenari, metre
+const PATCH_SPACING = 0.12;     // bu mesafeden yakin yeni yama eklenmez
+const PATCH_HEIGHT_TOL = 0.025; // ayni yuzey sayilan yukseklik farki
+const MAX_PATCHES = 500;
+
 // Tum odayi kaplayan tarama agi tek kutu olunca odanin icini doldurur; atlanir.
 const MAX_FURNITURE_SIZE = 3.5;  // metre
 
@@ -1338,12 +1349,12 @@ function updateSurfaces(frame, time) {
   if (!state.surfaceHintShown && time - state.sessionStart > 6000) {
     state.surfaceHintShown = true;
     const { furniture, total } = surfaceCounts();
-    if (!planes && !meshes) {
-      hud("Oda verisi izni yok: tarayici ayarlarindan 'uzamsal veri'ye izin ver", 8000);
-    } else if (total === 0) {
-      hud("Oda taramasi yok: Quest Ayarlar > Fiziksel alan > Alan kurulumu", 8000);
-    } else if (furniture === 0) {
-      hud("Taramada mobilya yok: Alan kurulumunda masalari da isaretle", 8000);
+    // Oda taramasi olmasa da bakilan yuzeyler ogreniliyor; kullaniciya
+    // fizigin nasil calistigini soyle.
+    if (furniture === 0) {
+      hud(total === 0 && !planes && !meshes
+        ? "Fizik icin masaya/yuzeylere bir kez bak: gozluk onlari ogrenir"
+        : "Masalara bir kez bak: fizik bakilan yuzeyleri ogrenir", 6000);
     }
   }
 }
@@ -1418,6 +1429,63 @@ function removeSurface(entry) {
   }
 }
 
+/**
+ * Hit-test isabetini fizik yamasi olarak ogrenir. Isabet pozunun Y ekseni
+ * yuzey normalidir; yama yuzeyin arkasinda SURFACE_THICKNESS kalinliginda.
+ * Yakininda ayni yukseklikte yama varsa eklenmez.
+ */
+const _hitPos = new THREE.Vector3();
+const _hitQuat = new THREE.Quaternion();
+const _hitNormal = new THREE.Vector3();
+
+function learnSurface(matrix) {
+  _pm.fromArray(matrix);
+  _pm.decompose(_hitPos, _hitQuat, _ps);
+  _hitNormal.set(0, 1, 0).applyQuaternion(_hitQuat);
+  // Egik yuzeyler (yastik, kol) guvenilmez; yatay ve dikey olanlari al.
+  const horizontal = _hitNormal.y > 0.85;
+  const vertical = Math.abs(_hitNormal.y) < 0.25;
+  if (!horizontal && !vertical) return;
+
+  for (const patch of state.patches) {
+    if (patch.horizontal !== horizontal) continue;
+    const d = patch.pos.distanceTo(_hitPos);
+    if (horizontal) {
+      const dy = Math.abs(patch.pos.y - _hitPos.y);
+      if (dy < PATCH_HEIGHT_TOL && d < PATCH_SPACING) return;
+    } else if (d < PATCH_SPACING) {
+      return;
+    }
+  }
+  if (state.patches.length >= MAX_PATCHES) {
+    const old = state.patches.shift();
+    removeSurface(old);
+  }
+
+  // Yatay yamada dunya dikeyini kullan: kucuk egim hatasi model kaydirmasin.
+  if (horizontal) _hitQuat.identity();
+  const centre = new THREE.Vector3(0, -SURFACE_THICKNESS / 2, 0).applyQuaternion(_hitQuat).add(_hitPos);
+  const body = new CANNON.Body({
+    type: CANNON.Body.STATIC,
+    shape: new CANNON.Box(new CANNON.Vec3(PATCH_SIZE / 2, SURFACE_THICKNESS / 2, PATCH_SIZE / 2)),
+  });
+  body.position.set(centre.x, centre.y, centre.z);
+  body.quaternion.set(_hitQuat.x, _hitQuat.y, _hitQuat.z, _hitQuat.w);
+  state.world.addBody(body);
+
+  const patch = { body, debug: null, label: "yama", pos: _hitPos.clone(), horizontal };
+  if (DEBUG) {
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(PATCH_SIZE, 0.002, PATCH_SIZE)),
+      new THREE.LineBasicMaterial({ color: 0x3ddc97, transparent: true, opacity: 0.5 }));
+    edges.position.copy(_hitPos);
+    edges.quaternion.copy(_hitQuat);
+    state.scene.add(edges);
+    patch.debug = edges;
+  }
+  state.patches.push(patch);
+}
+
 function surfaceCounts() {
   let total = 0, furniture = 0;
   for (const e of state.surfaces.values()) {
@@ -1425,7 +1493,7 @@ function surfaceCounts() {
     total++;
     if (e.label !== "duzlem") furniture++;
   }
-  return { total, furniture };
+  return { total, furniture, patches: state.patches.length };
 }
 
 // --- menu baglantisi --------------------------------------------------------
@@ -1514,6 +1582,7 @@ async function enterAR() {
   state.session = session;
   state.inputs = [];
   state.surfaces = new Map();
+  state.patches = [];
   state.surfaceHintShown = false;
   state.sessionStart = 0;
   state.grab = null;
@@ -1580,6 +1649,7 @@ function onFrame(time, frame) {
       const pose = hits[0].getPose(refSpace);
       state.reticle.visible = true;
       state.reticle.matrix.fromArray(pose.transform.matrix);
+      learnSurface(pose.transform.matrix);
     } else {
       state.reticle.visible = false;
     }
@@ -1598,8 +1668,8 @@ function onFrame(time, frame) {
     state.lastDebug = time;
     const hands = state.inputs.filter((i) => i.source)
       .map((i) => `${i.handedness[0] || "?"}:${i.isHand ? (i.tracked ? "el" : "el-yok") : "kum"}`).join(" ");
-    const { total, furniture } = surfaceCounts();
-    showToast(`${hands} · mobilya ${furniture}/${total} · ${state.debugText}`, 1000);
+    const { total, furniture, patches } = surfaceCounts();
+    showToast(`${hands} · yama ${patches} · mobilya ${furniture}/${total} · ${state.debugText}`, 1000);
   }
 
   const m = state.model;
