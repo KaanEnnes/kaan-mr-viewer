@@ -8,6 +8,7 @@
  */
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { Label } from "./tools.js";
 
 const BACKGROUND = 0x11141b;
 
@@ -307,6 +308,8 @@ export function initDesktop(api) {
     for (const x of state.models) x.holder.updateMatrixWorld(true);
     state.section.update();
     api.setHead(camera.position);
+    // Yazilar kameraya uzakliga gore buyusun: uzaktan da okunsun.
+    Label.scale = THREE.MathUtils.clamp(camera.position.distanceTo(controls.target) / 0.6, 0.4, 20);
     api.updateShadowAndDims();
     state.ruler.update(settings.ruler, hover, camera.position);
     state.tech.update(camera.position, api.realScaleOf);

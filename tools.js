@@ -51,14 +51,18 @@ export class Label {
     this.texture.needsUpdate = true;
   }
 
-  place(position, headPos) {
+  /** scale: PC'de kamera uzakliga gore buyutur (VR'da 1). */
+  place(position, headPos, scale = Label.scale) {
     this.mesh.position.copy(position);
     this.mesh.lookAt(headPos);
+    this.mesh.scale.setScalar(scale);
     this.mesh.visible = true;
   }
 
   hide() { this.mesh.visible = false; }
 }
+// Tum etiketlerin ortak olcegi; PC goruntuleyicisi her karede ayarlar.
+Label.scale = 1;
 
 // --- golge ------------------------------------------------------------------
 

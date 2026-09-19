@@ -2523,6 +2523,7 @@ async function enterAR() {
   state.grab = null;
   state.twoHand = null;
   desktop.suspend();
+  Label.scale = 1; // VR'da etiketler gercek boyutta
   state.renderer.setClearColor(0x000000, 0); // passthrough gorunsun
   await state.renderer.xr.setSession(session);
 
