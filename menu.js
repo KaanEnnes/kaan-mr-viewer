@@ -42,10 +42,10 @@ export class WristMenu {
    *   model(): { name, realistic, opacity, scale, physics } | null
    *   catalog(): [{ name, url, ... }], currentUrl(): string
    *   settings(): { throw, push, handStyle, pinch, shadow, dims, ruler, depth, listMode }
-   *   tools(): { exploded, section, sectionT, anchorSaved, modelCount, anim }
+   *   tools(): { exploded, section, sectionT, anchorSaved, modelCount, anim, measures }
    *   actions: { toggleView, opacity(d), scale(f), realSize, fit, physics,
    *              bringFront, exit, load(entry), refresh, setSetting(k, v),
-   *              clearRuler, explode, removeModel, cycleSection, sectionStep(d),
+   *              clearMeasures, explode, removeModel, cycleSection, sectionStep(d),
    *              saveAnchor, forgetAnchor, animToggle, animRestart }
    * }
    */
@@ -333,14 +333,18 @@ export class WristMenu {
     pair(
       { id: "ruler", kind: "toggle", label: s.ruler ? "Cetvel acik" : "Cetvel", active: s.ruler,
         onPress: () => a.setSetting("ruler", !s.ruler) },
-      { id: "ruler-clear", kind: "button", label: "Cetveli sil", onPress: a.clearRuler },
+      { id: "tech", kind: "toggle", label: s.tech ? "Teknik detay acik" : "Teknik detay", active: s.tech,
+        onPress: () => a.setSetting("tech", !s.tech) },
     );
-    pair(
-      { id: "explode", kind: "toggle", label: t.exploded ? "Parcalari topla" : "Parcalari ayir",
-        active: t.exploded, onPress: a.explode },
-      { id: "remove", kind: "button", label: "Modeli kaldir", danger: t.modelCount > 1,
-        onPress: a.removeModel },
-    );
+    // Uclu satir: ayir / olcumleri sil / modeli kaldir.
+    const third = (R - L - 24) / 3;
+    add({ id: "explode", kind: "toggle", label: t.exploded ? "Topla" : "Ayir", active: t.exploded,
+      x: L, y, w: third, h, onPress: a.explode });
+    add({ id: "measure-clear", kind: "button", label: `Olcum sil${t.measures ? ` (${t.measures})` : ""}`,
+      x: L + third + 12, y, w: third, h, onPress: a.clearMeasures });
+    add({ id: "remove", kind: "button", label: "Kaldir", danger: t.modelCount > 1,
+      x: L + (third + 12) * 2, y, w: third, h, onPress: a.removeModel });
+    y += row;
 
     if (t.anim) {
       pair(

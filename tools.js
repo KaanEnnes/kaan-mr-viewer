@@ -118,61 +118,209 @@ export class ShadowCatcher {
 
 // --- cetvel -------------------------------------------------------------------
 
-/**
- * Iki nokta arasi olcum. Ilk nokta konunca ikinci nokta eli izler (canli
- * olcum); ikinci nokta konunca sabitlenir. Ucuncu nokta yeni olcum baslatir.
- */
-export class Ruler {
+const RULER_COLOR = 0xf5a524;
+const _dotGeo = new THREE.SphereGeometry(0.006, 12, 8);
+const _rulerMat = new THREE.MeshBasicMaterial({ color: RULER_COLOR, depthTest: false });
+const _rulerLineMat = new THREE.LineBasicMaterial({ color: RULER_COLOR, depthTest: false });
+
+function formatLength(m) {
+  const cm = m * 100;
+  return cm >= 100 ? `${(cm / 100).toFixed(2)} m` : cm >= 10 ? `${cm.toFixed(1)} cm` : `${(cm * 10).toFixed(1)} mm`;
+}
+
+/** Tek olcum: iki nokta, cizgi ve etiket. Bir modele yapistirilabilir. */
+class Measurement {
   constructor(scene) {
     this.group = new THREE.Group();
-    this.group.visible = false;
-    const dotGeo = new THREE.SphereGeometry(0.006, 12, 8);
-    const dotMat = new THREE.MeshBasicMaterial({ color: 0xf5a524, depthTest: false });
-    this.dots = [new THREE.Mesh(dotGeo, dotMat), new THREE.Mesh(dotGeo, dotMat)];
+    this.dots = [new THREE.Mesh(_dotGeo, _rulerMat), new THREE.Mesh(_dotGeo, _rulerMat)];
     this.line = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
-      new THREE.LineBasicMaterial({ color: 0xf5a524, depthTest: false }),
-    );
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), _rulerLineMat);
     for (const o of [...this.dots, this.line]) {
       o.renderOrder = 9;
       this.group.add(o);
     }
-    this.label = new Label(0.13);
-    this.group.add(this.label.mesh);
-    scene.add(this.group);
-    this.points = [];
-    this._mid = new THREE.Vector3();
+    this.label = new Label(0.12);
+    scene.add(this.group, this.label.mesh);
+    this.holder = null; // yapistigi model (tasininca birlikte gider)
+    this._a = new THREE.Vector3();
+    this._b = new THREE.Vector3();
   }
 
-  addPoint(p) {
-    if (this.points.length >= 2) this.points = [];
-    this.points.push(p.clone());
-  }
-
-  clear() { this.points = []; }
-
-  update(enabled, preview, headPos) {
-    this.group.visible = enabled && this.points.length > 0;
-    if (!this.group.visible) return;
-    const a = this.points[0];
-    const b = this.points[1] || preview;
+  /** Uclari dunya noktalarina koyar (grup henuz sahnede, olceksiz). */
+  set(a, b) {
     this.dots[0].position.copy(a);
-    this.dots[1].visible = Boolean(b);
-    if (!b) {
-      this.line.visible = false;
-      this.label.hide();
-      return;
-    }
     this.dots[1].position.copy(b);
     const pos = this.line.geometry.attributes.position;
     pos.setXYZ(0, a.x, a.y, a.z);
     pos.setXYZ(1, b.x, b.y, b.z);
     pos.needsUpdate = true;
     this.line.geometry.computeBoundingSphere();
-    this.line.visible = true;
-    const cm = a.distanceTo(b) * 100;
-    this.label.set(cm >= 100 ? `${(cm / 100).toFixed(2)} m` : `${cm.toFixed(1)} cm`);
-    this.label.place(this._mid.addVectors(a, b).multiplyScalar(0.5).add(new THREE.Vector3(0, 0.03, 0)), headPos);
+  }
+
+  /** Modele yapistir: attach dunya konumunu korur, model tasininca birlikte gider. */
+  stickTo(holder) {
+    this.holder = holder;
+    holder.attach(this.group);
+  }
+
+  update(headPos) {
+    const a = this.dots[0].getWorldPosition(this._a);
+    const b = this.dots[1].getWorldPosition(this._b);
+    // Modele yapisik olcum modelin gercek (1:1) boyutunu gosterir.
+    const scale = this.holder ? this.holder.scale.x : 1;
+    this.label.set(formatLength(a.distanceTo(b) / scale));
+    this.label.place(a.add(b).multiplyScalar(0.5).add(new THREE.Vector3(0, 0.025, 0)), headPos);
+  }
+
+  dispose() {
+    this.group.removeFromParent();
+    this.label.mesh.removeFromParent();
+    this.line.geometry.dispose();
+  }
+}
+
+/**
+ * Cetvel: iki noktayla bir olcum; olcumler yerinde kalir, yenileri eklenir.
+ * Iki nokta da ayni modelin ustundeyse olcum o modele yapisir.
+ */
+export class Ruler {
+  constructor(scene) {
+    this.scene = scene;
+    this.done = [];
+    this.points = [];
+    this.pointHolders = [];
+    this.preview = new Measurement(scene);
+    this.preview.group.visible = false;
+    this.preview.label.hide();
+  }
+
+  get count() { return this.done.length; }
+
+  /** Nokta ekler; ikinci noktada olcumu tamamlayip dondurur. */
+  addPoint(p, holder = null) {
+    this.points.push(p.clone());
+    this.pointHolders.push(holder);
+    if (this.points.length < 2) return null;
+    const m = new Measurement(this.scene);
+    m.set(this.points[0], this.points[1]);
+    const [h0, h1] = this.pointHolders;
+    if (h0 && h0 === h1) m.stickTo(h0);
+    this.done.push(m);
+    this.points = [];
+    this.pointHolders = [];
+    return m;
+  }
+
+  clear() {
+    for (const m of this.done) m.dispose();
+    this.done = [];
+    this.cancel();
+  }
+
+  /** Yarim kalan olcumu (tek nokta) iptal eder; bitmis olcumler kalir. */
+  cancel() {
+    this.points = [];
+    this.pointHolders = [];
+  }
+
+  /** Kaldirilan modele yapisik olcumleri siler. */
+  removeFor(holder) {
+    this.done = this.done.filter((m) => {
+      if (m.holder !== holder) return true;
+      m.dispose();
+      return false;
+    });
+  }
+
+  /** enabled: cetvel araci acik mi (canli onizleme icin); olcumler her zaman gorunur. */
+  update(enabled, preview, headPos) {
+    for (const m of this.done) m.update(headPos);
+    const live = enabled && this.points.length === 1 && preview;
+    this.preview.group.visible = Boolean(live);
+    if (!live) {
+      this.preview.label.hide();
+      return;
+    }
+    this.preview.set(this.points[0], preview);
+    this.preview.update(headPos);
+  }
+}
+
+// --- teknik detay ------------------------------------------------------------------
+
+const TECH_COLOR = 0x6ea8fe;
+const _techLineMat = new THREE.LineBasicMaterial({ color: TECH_COLOR, depthTest: false, transparent: true, opacity: 0.9 });
+
+/**
+ * Teknik detay: secilen parcanin kendi eksenindeki kutusu ve uc kenarinin
+ * gercek olculeri. Kutu parcanin cocugu (parca ayrilinca / model tasininca
+ * birlikte gider); etiketler sahnede, her karede kutunun kenarina oturur.
+ */
+export class TechDetail {
+  constructor(scene) {
+    this.scene = scene;
+    this.items = new Map(); // parca -> { box, labels, local }
+    this._p = [new THREE.Vector3(), new THREE.Vector3()];
+  }
+
+  get count() { return this.items.size; }
+
+  toggle(part) {
+    if (this.items.has(part)) {
+      this.remove(part);
+      return false;
+    }
+    if (!part.geometry) return false;
+    if (!part.geometry.boundingBox) part.geometry.computeBoundingBox();
+    const local = part.geometry.boundingBox.clone();
+    const size = local.getSize(new THREE.Vector3());
+    const box = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)), _techLineMat);
+    box.position.copy(local.getCenter(new THREE.Vector3()));
+    box.renderOrder = 9;
+    part.add(box);
+    const labels = [new Label(0.1), new Label(0.1), new Label(0.1)];
+    for (const l of labels) this.scene.add(l.mesh);
+    this.items.set(part, { box, labels, local });
+    return true;
+  }
+
+  remove(part) {
+    const it = this.items.get(part);
+    if (!it) return;
+    it.box.removeFromParent();
+    it.box.geometry.dispose();
+    for (const l of it.labels) l.mesh.removeFromParent();
+    this.items.delete(part);
+  }
+
+  clear() {
+    for (const part of [...this.items.keys()]) this.remove(part);
+  }
+
+  /** realScale(part): dunya metresini gercek metreye ceviren bolen (modelin gosterim olcegi). */
+  update(headPos, realScale) {
+    for (const [part, it] of this.items) {
+      if (!part.parent) {
+        this.remove(part);
+        continue;
+      }
+      const { min, max } = it.local;
+      // On-alt kenarlar: genislik (x), derinlik (z), yukseklik (y).
+      const edges = [
+        [[min.x, min.y, max.z], [max.x, min.y, max.z]],
+        [[max.x, min.y, min.z], [max.x, min.y, max.z]],
+        [[max.x, min.y, max.z], [max.x, max.y, max.z]],
+      ];
+      const div = realScale(part) || 1;
+      edges.forEach(([a, b], i) => {
+        const pa = this._p[0].set(...a).applyMatrix4(part.matrixWorld);
+        const pb = this._p[1].set(...b).applyMatrix4(part.matrixWorld);
+        const len = pa.distanceTo(pb) / div;
+        it.labels[i].set(formatLength(len));
+        it.labels[i].place(pa.add(pb).multiplyScalar(0.5), headPos);
+      });
+    }
   }
 }
 

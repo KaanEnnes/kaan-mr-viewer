@@ -181,8 +181,8 @@ export function initDesktop(api) {
       api.togglePhysics();
     },
     anim: () => api.toggleAnimation(),
-    "ruler-clear": () => {
-      state.ruler.clear();
+    "measure-clear": () => {
+      api.clearMeasurements();
       el.rulerOut.textContent = "";
     },
   };
@@ -193,7 +193,7 @@ export function initDesktop(api) {
     if (b.dataset.toggle) {
       const key = b.dataset.toggle;
       api.setSetting(key, !settings[key]);
-      if (key === "ruler") el.rulerOut.textContent = settings.ruler ? "Modelin uzerinde iki noktaya tikla" : "";
+      if (key === "ruler" || key === "tech") el.rulerOut.textContent = hint();
     } else if (actions[b.dataset.act]) {
       actions[b.dataset.act]();
     }
@@ -234,34 +234,51 @@ export function initDesktop(api) {
   let hover = null;
   let down = null;
 
+  function hint() {
+    if (settings.tech) return "Olculerini gormek istedigin parcaya tikla (tekrar tiklayinca kalkar)";
+    if (settings.ruler) {
+      return state.ruler.points.length === 1
+        ? "Ikinci noktaya tikla"
+        : "Iki noktaya tikla; olcumler yerinde kalir, model uzerindekiler modele yapisir";
+    }
+    return "";
+  }
+
+  /** Farenin altindaki nokta; model uzerindeyse modelin tutucusu ve parcasi da. */
   function pick(e) {
     const rect = canvas.getBoundingClientRect();
     ndc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
     raycaster.setFromCamera(ndc, camera);
     const hits = raycaster.intersectObjects(state.models.map((m) => m.holder), true)
       .filter((h) => h.object.isMesh && h.object.visible);
-    if (hits.length) return hits[0].point.clone();
-    return raycaster.ray.intersectPlane(ground, new THREE.Vector3());
+    for (const h of hits) {
+      const model = state.models.find((m) => m.parts.includes(h.object));
+      if (model) return { point: h.point.clone(), holder: model.holder, part: h.object };
+    }
+    const p = raycaster.ray.intersectPlane(ground, new THREE.Vector3());
+    return p ? { point: p, holder: null, part: null } : null;
   }
 
   canvas.addEventListener("pointermove", (e) => {
-    hover = settings.ruler ? pick(e) : null;
+    const hit = settings.ruler ? pick(e) : null;
+    hover = hit ? hit.point : null;
   });
   canvas.addEventListener("pointerdown", (e) => {
     down = { x: e.clientX, y: e.clientY };
   });
   canvas.addEventListener("pointerup", (e) => {
-    if (!settings.ruler || !down) return;
+    if (!down || !(settings.ruler || settings.tech)) return;
     const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
     down = null;
     if (moved > 5) return; // surukleme = kamerayi dondurme
-    const p = pick(e);
-    if (!p) return;
-    state.ruler.addPoint(p);
-    const pts = state.ruler.points;
-    el.rulerOut.textContent = pts.length === 2
-      ? `Mesafe: ${(pts[0].distanceTo(pts[1]) * 100).toFixed(1)} cm (gercek olcekte ${(pts[0].distanceTo(pts[1]) * 100 / (state.model?.holder.scale.x || 1)).toFixed(1)} cm)`
-      : "Ikinci noktaya tikla";
+    const hit = pick(e);
+    if (!hit) return;
+    if (settings.tech) {
+      if (hit.part) state.tech.toggle(hit.part);
+    } else {
+      state.ruler.addPoint(hit.point, hit.holder);
+    }
+    el.rulerOut.textContent = hint();
   });
 
   // --- kare dongusu ---------------------------------------------------------------
@@ -289,6 +306,7 @@ export function initDesktop(api) {
     api.setHead(camera.position);
     api.updateShadowAndDims();
     state.ruler.update(settings.ruler, hover, camera.position);
+    state.tech.update(camera.position, api.realScaleOf);
     renderer.render(state.scene, camera);
   }
 

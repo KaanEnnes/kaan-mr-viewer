@@ -21,7 +21,7 @@ import { splitDisconnected } from "./split.js";
 import { parse3mf, MF_UNITS } from "./threemf.js";
 import { SoftOcclusion } from "./occlusion.js";
 import { initDesktop } from "./desktop.js";
-import { Label, ShadowCatcher, Ruler, Section, SECTION_MODES, WristButton } from "./tools.js";
+import { Label, ShadowCatcher, Ruler, TechDetail, Section, SECTION_MODES, WristButton } from "./tools.js";
 
 // --- sabitler ---------------------------------------------------------------
 
@@ -436,7 +436,7 @@ document.addEventListener("visibilitychange", () => {
 const SETTINGS_STORAGE = "kaan-mr-viewer.settings";
 const DEFAULT_SETTINGS = {
   throw: true, push: true, handStyle: "tips", pinch: "normal",
-  shadow: true, dims: false, ruler: false, depth: false, listMode: "replace",
+  shadow: true, dims: false, ruler: false, tech: false, depth: false, listMode: "replace",
 };
 
 // Cimdik baslangic / bitis mesafeleri (basparmak ucu - isaret parmagi ucu).
@@ -467,7 +467,10 @@ function setSetting(key, value) {
   saveSettings();
   if (key === "handStyle") for (const input of state.inputs) applyHandStyle(input);
   if (key === "push" && !value) removeFingerBodies();
-  if (key === "ruler") state.ruler?.clear();
+  // Cetvel ve teknik detay ayni dokunusu kullanir: biri acilinca digeri kapanir.
+  if (key === "ruler" && value) settings.tech = false;
+  if (key === "tech" && value) settings.ruler = false;
+  if (key === "ruler" || key === "tech") state.ruler?.cancel();
   const onOff = value ? "acik" : "kapali";
   const labels = {
     throw: `Firlatma ${onOff}`,
@@ -476,7 +479,8 @@ function setSetting(key, value) {
     pinch: "Cimdik hassasiyeti degisti",
     shadow: `Golge ${onOff}`,
     dims: `Olculer ${onOff}`,
-    ruler: value ? "Cetvel: iki noktaya cimdik / tetik" : "Cetvel kapali",
+    ruler: value ? "Cetvel: iki noktaya cimdik / tetik (olcumler yerinde kalir)" : "Cetvel kapali",
+    tech: value ? "Teknik detay: olculerini gormek istedigin parcaya dokun" : "Teknik detay kapali",
     depth: value ? "Gercek nesne ortme sonraki giriste acilir" : "Ortme sonraki giriste kapanir",
     listMode: value === "add" ? "Listeden secilen model sahneye eklenir" : "Listeden secilen model degistirilir",
   };
@@ -600,6 +604,7 @@ function initScene() {
   buildWorld();
   state.shadow = new ShadowCatcher(state.scene, state.renderer, state.sun);
   state.ruler = new Ruler(state.scene);
+  state.tech = new TechDetail(state.scene);
   state.section = new Section();
   state.dimsLabel = new Label(0.2);
   state.scene.add(state.dimsLabel.mesh);
@@ -864,6 +869,8 @@ function computeExplodeOffsets(parts, rootInv, modelCentre) {
 
 function disposeModel(m) {
   if (!m) return;
+  state.ruler?.removeFor(m.holder);
+  for (const part of m.parts) state.tech?.remove(part);
   if (state.section?.model === m) state.section.detach();
   removeBodies(m);
   m.holder.removeFromParent();
@@ -1449,12 +1456,73 @@ function rulerPoint(input, out) {
 }
 
 function addRulerPoint(input) {
-  state.ruler.addPoint(rulerPoint(input, _v));
+  const p = rulerPoint(input, new THREE.Vector3());
+  const owner = modelAt(p);
+  const done = state.ruler.addPoint(p, owner ? owner.holder : null);
   state.rulerInput = input;
-  if (state.ruler.points.length === 2) {
-    const cm = state.ruler.points[0].distanceTo(state.ruler.points[1]) * 100;
-    hud(`${cm.toFixed(1)} cm`, 2500);
+  if (done) {
+    hud(done.holder ? "Olcum modele yapisti (gercek boyut)" : `Olcum ${state.ruler.count} eklendi`, 1800);
   }
+}
+
+// --- teknik detay ------------------------------------------------------------------
+
+/** Parcanin ait oldugu modelin gosterim olcegi: dunya metresi / gercek metre. */
+function realScaleOf(part) {
+  for (const m of state.models) if (m.parts.includes(part)) return m.holder.scale.x;
+  return 1;
+}
+
+/** Noktayi iceren en kucuk parca (ic ice parcalarda icteki secilsin). */
+function partAt(point) {
+  const box = new THREE.Box3();
+  let best = null;
+  let bestVolume = Infinity;
+  for (const m of state.models) {
+    for (const part of m.parts) {
+      box.setFromObject(part).expandByScalar(0.01);
+      if (!box.containsPoint(point)) continue;
+      const s = box.getSize(_v2);
+      const volume = s.x * s.y * s.z;
+      if (volume < bestVolume) {
+        bestVolume = volume;
+        best = part;
+      }
+    }
+  }
+  return best;
+}
+
+const _techRay = new THREE.Raycaster();
+
+/** Kumanda isinin degdigi parca. */
+function partOnRay(input) {
+  input.controller.getWorldPosition(_v);
+  input.controller.getWorldDirection(_v2).negate();
+  _techRay.set(_v, _v2);
+  const hits = _techRay.intersectObjects(state.models.map((m) => m.holder), true);
+  for (const h of hits) {
+    if (!h.object.isMesh || !h.object.visible) continue;
+    for (const m of state.models) if (m.parts.includes(h.object)) return h.object;
+  }
+  return null;
+}
+
+function toggleTech(part) {
+  if (!part) {
+    hud("Parca bulunamadi: parcanin ustune dokun", 1500);
+    return;
+  }
+  hud(state.tech.toggle(part) ? "Parca olculeri gosteriliyor" : "Parca secimi kaldirildi", 1200);
+  state.menu?.invalidate();
+}
+
+function clearMeasurements() {
+  state.ruler.clear();
+  state.tech.clear();
+  hud("Olcumler silindi", 900);
+  state.menu?.invalidate();
+  desktop?.refresh();
 }
 
 const _rulerPreview = new THREE.Vector3();
@@ -1651,6 +1719,10 @@ function onSelect(input) {
     state.menu.clickAt(hit);
     return;
   }
+  if (settings.tech) {
+    toggleTech(partOnRay(input));
+    return;
+  }
   if (settings.ruler) {
     addRulerPoint(input);
     return;
@@ -1734,6 +1806,10 @@ function updateHand(input, time) {
 }
 
 function onPinchStart(input) {
+  if (settings.tech) {
+    toggleTech(partAt(input.tip));
+    return;
+  }
   if (settings.ruler) {
     addRulerPoint(input);
     return;
@@ -2315,6 +2391,7 @@ function buildMenu() {
       sectionT: state.sectionT,
       anchorSaved: Boolean(state.model && loadAnchorMap()[state.model.entry.url]),
       modelCount: state.models.length,
+      measures: state.ruler.count + state.tech.count,
       anim: state.model && state.model.anim ? {
         playing: state.model.anim.playing,
         progress: state.model.anim.action.time / (state.model.anim.duration || 1),
@@ -2346,7 +2423,7 @@ function buildMenu() {
         menu.setStatus("");
       },
       setSetting,
-      clearRuler: () => { state.ruler.clear(); hud("Cetvel temizlendi", 900); },
+      clearMeasures: clearMeasurements,
       explode: toggleExplode,
       removeModel: removeActiveModel,
       cycleSection,
@@ -2543,6 +2620,7 @@ function onFrame(time, frame) {
   state.section.update();
   updateShadowAndDims();
   updateRuler();
+  state.tech.update(_headPos, realScaleOf);
   state.occlusion?.update();
 
   state.renderer.render(state.scene, state.camera);
@@ -2559,7 +2637,7 @@ desktop = initDesktop({
   toggleView, setOpacity, setScale, toggleExplode, updateExplode, applySection,
   togglePhysics, liftAboveFloor, buildBodies, removeBodies, syncPartsFromBodies,
   updateShadowAndDims, toggleAnimation, seekAnimation, updateAnimations,
-  restoreHome, applyExplode,
+  restoreHome, applyExplode, realScaleOf, clearMeasurements,
   fitScaleOf: (m) => (m.longest > DEFAULT_SIZE ? DEFAULT_SIZE / m.longest : 1),
 });
 state.renderer.setAnimationLoop(desktop.frame);
