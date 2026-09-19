@@ -250,3 +250,67 @@ footer { margin-top: 28px; }
   .controls dl { grid-template-columns: 1fr; gap: 2px 0; }
   .controls dd { margin-bottom: 8px; }
 }
+
+/* --- PC onizleme ------------------------------------------------------------ */
+
+.viewer {
+  position: relative;
+  margin-top: 12px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #11141b;
+  min-height: 200px;
+}
+.viewer-canvas {
+  display: block;
+  width: 100%;
+  touch-action: none; /* dokunmatikte surukleme sayfayi kaydirmasin */
+}
+.viewer-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  pointer-events: none;
+}
+.viewer-info { font-size: 13px; text-align: right; }
+
+.viewer-tools { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.tool-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.tool-row input[type="range"] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+
+.chip {
+  width: auto;
+  padding: 7px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.chip[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.tool-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.tool-slider input[type="range"] { width: 120px; accent-color: var(--accent); }
+.tool-slider select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+#t-ruler-out { margin: 0; }

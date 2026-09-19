@@ -43,10 +43,57 @@
       <p class="muted">Katalog yukleniyor&hellip;</p>
     </div>
     <label class="filedrop" for="file-input">
-      <input type="file" id="file-input" accept=".glb,.gltf,.3mf" hidden>
+      <input type="file" id="file-input" accept=".glb,.gltf,.3mf,.stl,.obj,.zip" hidden>
       <strong>Kendi modelini yukle</strong>
-      <span>GLB, glTF veya 3MF &mdash; buluta yuklenir, gozlukte de listede gorunur</span>
+      <span>GLB, 3MF, STL, OBJ ya da zip (dokulariyla) &mdash; buluta yuklenir, gozlukte de listede gorunur</span>
     </label>
+  </section>
+
+  <section class="card" id="viewer-card">
+    <div class="card-head">
+      <h2>Onizleme</h2>
+      <span class="muted viewer-info" id="viewer-info"></span>
+    </div>
+    <div id="viewer" class="viewer">
+      <p id="viewer-empty" class="viewer-empty">Listeden bir model sec</p>
+    </div>
+    <div id="viewer-tools" class="viewer-tools" hidden>
+      <div class="tool-row">
+        <button type="button" class="chip" data-act="view" id="t-view" aria-pressed="false">Hayalet</button>
+        <label class="tool-slider">Seffaflik
+          <input type="range" id="t-opacity" min="0" max="90" value="0">
+        </label>
+        <button type="button" class="chip" data-act="fit">Sigdir</button>
+        <button type="button" class="chip" data-act="real">1:1</button>
+        <button type="button" class="chip" data-act="camera">Kamera</button>
+        <button type="button" class="chip" data-act="reset">Sifirla</button>
+      </div>
+      <div class="tool-row">
+        <button type="button" class="chip" data-toggle="dims" aria-pressed="false">Olculer</button>
+        <button type="button" class="chip" data-toggle="shadow" aria-pressed="false">Golge</button>
+        <button type="button" class="chip" data-act="explode" id="t-explode" aria-pressed="false">Parcalari ayir</button>
+        <button type="button" class="chip" data-act="physics" id="t-physics" aria-pressed="false">Fizik</button>
+        <button type="button" class="chip" data-toggle="ruler" aria-pressed="false">Cetvel</button>
+        <button type="button" class="chip" data-act="ruler-clear">Cetveli sil</button>
+      </div>
+      <div class="tool-row">
+        <label class="tool-slider">Kesit
+          <select id="t-section">
+            <option value="off">Kapali</option>
+            <option value="y">Yatay</option>
+            <option value="x">Dikey X</option>
+            <option value="z">Dikey Z</option>
+          </select>
+        </label>
+        <input type="range" id="t-section-pos" min="2" max="98" value="50" disabled aria-label="Kesit yeri">
+      </div>
+      <div class="tool-row" id="t-anim-row" hidden>
+        <button type="button" class="chip" data-act="anim" id="t-anim" aria-pressed="false">&#9654; Animasyon</button>
+        <input type="range" id="t-anim-pos" min="0" max="1000" value="0" aria-label="Animasyon konumu">
+        <span class="muted" id="t-anim-time"></span>
+      </div>
+      <p class="muted" id="t-ruler-out"></p>
+    </div>
   </section>
 
   <section class="card">

@@ -7,6 +7,10 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { ThreeMFLoader } from "three/addons/loaders/3MFLoader.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
+import { unzipSync, strFromU8 } from "three/addons/libs/fflate.module.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 import * as CANNON from "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js";
 import {
@@ -16,6 +20,7 @@ import { WristMenu, MENU_WIDTH } from "./menu.js";
 import { splitDisconnected } from "./split.js";
 import { parse3mf, MF_UNITS } from "./threemf.js";
 import { SoftOcclusion } from "./occlusion.js";
+import { initDesktop } from "./desktop.js";
 import { Label, ShadowCatcher, Ruler, Section, SECTION_MODES, WristButton } from "./tools.js";
 
 // --- sabitler ---------------------------------------------------------------
@@ -49,6 +54,12 @@ const EXPLODE_FACTOR = 0.9;
 // Bu kadar yakin (gercek boyutta) parcalar birbirine bagli sayilir: print-in-place
 // tasarimlarda hareketli parcalar arasinda ~0.3-0.5 mm baski boslugu olur.
 const JOINT_GAP = 0.0015;        // metre
+// Bundan cok parcali modeller (or. 94 parcali motor) fizikte tek sert govde:
+// her parcaya govde + mentese gozlugu bogar, parcalar zaten birbirine gecmis.
+const MAX_PHYSICS_PARTS = 40;
+// Otomatik kabuk ayirma yalnizca bu kadar az mesh'li modellerde: cok parcali
+// modeller zaten parcali, bolunurse vida/somun gibi yuzlerce parca cikiyor.
+const SPLIT_MAX_MESHES = 3;
 const EXPLODE_SPEED = 3;         // saniyede tamamlanan oran
 // Kalici konumlar: model adresi -> { uuid, scale }
 const ANCHOR_STORAGE = "kaan-mr-viewer.anchors";
@@ -104,6 +115,9 @@ const state = {
 };
 
 const handFactory = new XRHandModelFactory();
+
+// PC goruntuleyicisi (desktop.js); baslangicta kurulur.
+let desktop = null;
 
 const el = {
   xrDot: document.getElementById("xr-dot"),
@@ -204,7 +218,7 @@ function renderCatalog() {
     btn.innerHTML =
       `<span class="name">${escapeHtml(m.name)}` +
       (m.articulated ? `<span class="badge">${m.partCount} parca</span>` : "") +
-      (m.cloud ? `<span class="badge cloud">${m.format === "3mf" ? "3MF" : "GLB"}</span>` : "") +
+      (m.cloud ? `<span class="badge cloud">${m.format === "gltf" ? "GLB" : m.format.toUpperCase()}</span>` : "") +
       `</span><span class="meta">${meta}</span>`;
 
     btn.addEventListener("click", () => selectModel(m, btn));
@@ -314,12 +328,70 @@ function selectModel(entry, btn) {
   }
   el.enter.disabled = false;
   el.hint.textContent = `"${entry.name}" secildi.`;
+  showModel(entry);
+}
+
+/**
+ * Zip'ten modeli cikarir. Sketchfab / Thingiverse paketlerinde model bir
+ * klasorde, dokulari yaninda olur. GLB kendi icinde her seyi tasir; ayri
+ * dosyali glTF ise dokulariyla yuklenip tek GLB'ye paketlenir (buluta tek
+ * dosya gider, gozluk de tek dosya indirir).
+ */
+async function modelFromZip(zipFile) {
+  const files = unzipSync(new Uint8Array(await zipFile.arrayBuffer()));
+  const names = Object.keys(files).filter((n) => !n.startsWith("__MACOSX/") && files[n].length);
+  const base = zipFile.name.replace(/\.zip$/i, "");
+  const largest = (re) => names.filter((n) => re.test(n)).sort((a, b) => files[b].length - files[a].length)[0];
+
+  const glb = largest(/\.glb$/i);
+  if (glb) return new File([files[glb]], `${base}.glb`, { type: "model/gltf-binary" });
+
+  const gltf = largest(/\.gltf$/i);
+  if (gltf) return new File([await packGltf(files, gltf)], `${base}.glb`, { type: "model/gltf-binary" });
+
+  for (const ext of MODEL_EXTS) {
+    const n = largest(new RegExp(`\\.${ext}$`, "i"));
+    if (n) return new File([files[n]], `${base}.${ext}`);
+  }
+  throw new Error("zip icinde model (glb, gltf, 3mf, stl, obj) yok");
+}
+
+async function packGltf(files, gltfPath) {
+  const dir = gltfPath.includes("/") ? gltfPath.slice(0, gltfPath.lastIndexOf("/") + 1) : "";
+  const urls = new Map();
+  const blobUrl = (path) => {
+    if (!files[path]) return null;
+    if (!urls.has(path)) urls.set(path, URL.createObjectURL(new Blob([files[path]])));
+    return urls.get(path);
+  };
+  const manager = new THREE.LoadingManager();
+  manager.setURLModifier((url) => {
+    if (/^(data|blob):/.test(url)) return url;
+    const rel = decodeURIComponent(url.replace(/^\.\//, ""));
+    return blobUrl(dir + rel) || blobUrl(rel) || url;
+  });
+  try {
+    const loaded = await new GLTFLoader(manager).parseAsync(strFromU8(files[gltfPath]), "");
+    return await new GLTFExporter().parseAsync(loaded.scene, { binary: true, animations: loaded.animations });
+  } finally {
+    for (const u of urls.values()) URL.revokeObjectURL(u);
+  }
 }
 
 el.file.addEventListener("change", async (e) => {
-  const file = e.target.files && e.target.files[0];
+  let file = e.target.files && e.target.files[0];
   e.target.value = ""; // ayni dosya tekrar secilebilsin
   if (!file) return;
+  if (/\.zip$/i.test(file.name)) {
+    el.hint.textContent = "Zip aciliyor…";
+    try {
+      file = await modelFromZip(file);
+      el.hint.textContent = `Zip'ten cikarildi: ${file.name} (${formatBytes(file.size)})`;
+    } catch (err) {
+      el.hint.textContent = "Zip acilamadi: " + err.message;
+      return;
+    }
+  }
   for (const b of el.list.querySelectorAll(".model")) {
     b.setAttribute("aria-pressed", "false");
   }
@@ -331,6 +403,7 @@ el.file.addEventListener("change", async (e) => {
       const saved = await uploadFile(file, key);
       state.selected = { name: file.name, url: saved.url, format: formatOf(file.name), cloud: true };
       state.localFile = null;
+      showModel(state.selected);
       await loadCatalog();
       el.hint.textContent = `"${file.name}" buluta yuklendi — gozlukte de listede.`;
       el.enter.disabled = false;
@@ -345,6 +418,7 @@ el.file.addEventListener("change", async (e) => {
   state.localFile = URL.createObjectURL(file);
   state.selected = { name: file.name, url: state.localFile, local: true,
                      format: formatOf(file.name) };
+  showModel(state.selected);
   el.enter.disabled = false;
   if (!key) el.hint.textContent = `"${file.name}" secildi (sadece bu cihazda).`;
 });
@@ -452,8 +526,8 @@ function buildRenderer() {
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType("local-floor");
   renderer.localClippingEnabled = true; // kesit duzlemi
-  document.body.appendChild(renderer.domElement);
-  renderer.domElement.style.display = "none";
+  // Tuval PC goruntuleyicisinde durur (desktop.js); VR'da gozluk kendi
+  // katmanina cizer.
   state.renderer = renderer;
 }
 
@@ -515,18 +589,77 @@ function showToast(text, ms) {
   t.timer = setTimeout(() => { t.mesh.visible = false; }, ms);
 }
 
+/**
+ * Sahne, fizik dunyasi ve araclar sayfa acilinca bir kez kurulur: PC
+ * goruntuleyicisi ve VR ayni sahneyi kullanir, PC'de acilan model VR'a
+ * aynen tasinir.
+ */
+function initScene() {
+  buildRenderer();
+  buildScene();
+  buildWorld();
+  state.shadow = new ShadowCatcher(state.scene, state.renderer, state.sun);
+  state.ruler = new Ruler(state.scene);
+  state.section = new Section();
+  state.dimsLabel = new Label(0.2);
+  state.scene.add(state.dimsLabel.mesh);
+  state.wristButton = new WristButton(state.scene);
+}
+
+let _showToken = 0;
+
+/** Secilen modeli sahneye koyar (PC'de secince hemen, VR'a girerken gerekirse). */
+async function showModel(entry) {
+  const token = ++_showToken;
+  desktop?.loading(entry);
+  try {
+    const m = await spawnModel(entry);
+    if (token !== _showToken) {
+      disposeModel(m);
+      return null;
+    }
+    releaseAll();
+    for (const old of state.models) disposeModel(old);
+    state.models = [m];
+    state.model = null;
+    state.scene.add(m.holder);
+    setActive(m);
+    m.realistic = !state.session;
+    setOpacity(state.session ? GHOST_OPACITY : 1);
+    desktop?.onModel(m);
+    return m;
+  } catch (err) {
+    if (token === _showToken) desktop?.failed(err);
+    throw err;
+  }
+}
+
+/** Oda yuzeylerini (onceki oturumun masa/yama govdeleri) fizikten siler. */
+function resetRoomSurfaces() {
+  for (const entry of state.surfaces.values()) removeSurface(entry);
+  state.surfaces = new Map();
+  for (const patch of state.patches) removeSurface(patch);
+  state.patches = [];
+}
+
 // --- model yukleme ----------------------------------------------------------
 
 const gltfLoader = new GLTFLoader();
 const threeMfLoader = new ThreeMFLoader();
 
+const MODEL_EXTS = ["3mf", "stl", "obj"];
+
 function formatOf(name) {
-  return /\.3mf$/i.test(name) ? "3mf" : "gltf";
+  const ext = (String(name).match(/\.([a-z0-9]+)(?:$|[?#])/i) || [])[1];
+  return ext && MODEL_EXTS.includes(ext.toLowerCase()) ? ext.toLowerCase() : "gltf";
 }
 
 function loadGltf(url) {
   return new Promise((resolve, reject) => {
-    gltfLoader.load(url, (g) => resolve(g.scene), undefined, (e) => reject(e));
+    gltfLoader.load(url, (g) => {
+      g.scene.animations = g.animations; // spawnModel animasyonu buradan kurar
+      resolve(g.scene);
+    }, undefined, (e) => reject(e));
   });
 }
 
@@ -553,9 +686,51 @@ async function load3mf(url) {
   return wrapper;
 }
 
+const stlLoader = new STLLoader();
+const objLoader = new OBJLoader();
+
+const printMaterial = () => new THREE.MeshStandardMaterial({ color: 0xb4bcc8, roughness: 0.6, metalness: 0 });
+
+/** STL: tek geometri, Z yukari ve (3B baski dunyasinda hep) milimetre. */
+async function loadStl(url) {
+  const geometry = await stlLoader.loadAsync(url);
+  if (!geometry.attributes.normal) geometry.computeVertexNormals();
+  const inner = new THREE.Group();
+  inner.add(new THREE.Mesh(geometry, printMaterial()));
+  inner.rotation.x = -Math.PI / 2;
+  inner.scale.setScalar(0.001);
+  const root = new THREE.Group();
+  root.add(inner);
+  root.userData.unitsKnown = true;
+  return root;
+}
+
+/**
+ * OBJ: Y yukari. Tinkercad ve dilimleyiciler milimetre yazar, Blender metre;
+ * 5 birimden buyuk nesne milimetre sayilir (5 m'lik obje nadir, 5 mm'lik de).
+ */
+async function loadObj(url) {
+  const obj = await objLoader.loadAsync(url);
+  obj.traverse((o) => {
+    if (o.isMesh && (!o.material || Array.isArray(o.material) === false && o.material.type === "MeshPhongMaterial" && !o.material.map)) {
+      o.material = printMaterial();
+    }
+  });
+  obj.updateMatrixWorld(true);
+  const size = new THREE.Box3().setFromObject(obj).getSize(new THREE.Vector3());
+  if (Math.max(size.x, size.y, size.z) > 5) obj.scale.setScalar(0.001);
+  const root = new THREE.Group();
+  root.add(obj);
+  root.userData.unitsKnown = true;
+  return root;
+}
+
 function loadModel(entry) {
   const format = entry.format || formatOf(entry.url);
-  return format === "3mf" ? load3mf(entry.url) : loadGltf(entry.url);
+  if (format === "3mf") return load3mf(entry.url);
+  if (format === "stl") return loadStl(entry.url);
+  if (format === "obj") return loadObj(entry.url);
+  return loadGltf(entry.url);
 }
 
 /**
@@ -571,13 +746,33 @@ async function spawnModel(entry) {
   // Tek mesh'e gomulmus parcalari (Creality vb. donusturuculer) kabuklarina
   // ayir. Pipeline'in PART_ adli parcalari zaten ayri; onlara dokunulmaz.
   let pipelineParts = false;
-  root.traverse((o) => { if (o.name.startsWith("PART_")) pipelineParts = true; });
-  if (!pipelineParts) splitDisconnected(root);
+  let meshCount = 0;
+  root.traverse((o) => {
+    if (o.name.startsWith("PART_")) pipelineParts = true;
+    if (o.isMesh) meshCount++;
+  });
+  // Animasyon izleri dugum adina bagli: bolunen mesh izini kaybeder.
+  const animated = root.animations && root.animations.length > 0;
+  if (!pipelineParts && !animated && meshCount <= SPLIT_MAX_MESHES) splitDisconnected(root);
+
+  // Modelin kendi animasyonu (or. patlatilmis gorunum): basta, duraklatilmis.
+  let anim = null;
+  if (animated) {
+    const clip = root.animations.reduce((a, b) => (b.duration > a.duration ? b : a));
+    const mixer = new THREE.AnimationMixer(root);
+    const action = mixer.clipAction(clip);
+    action.setLoop(THREE.LoopOnce, 1);
+    action.clampWhenFinished = true;
+    action.play();
+    action.paused = true;
+    mixer.update(0);
+    anim = { mixer, action, duration: clip.duration, playing: false };
+  }
 
   // GLB standardi metre ister ama dilimleyiciler cogu zaman milimetre yazar:
   // 21 cm'lik kalemlik 210 m gelir. 20 m'den buyuk model milimetre sayilir.
   // (3MF kendi birimini tasir, load3mf onu zaten uyguladi.)
-  if ((entry.format || formatOf(entry.url)) !== "3mf") {
+  if ((entry.format || formatOf(entry.url)) === "gltf" && !root.userData.unitsKnown) {
     root.updateMatrixWorld(true);
     const raw = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
     if (Math.max(raw.x, raw.y, raw.z) > 20) root.scale.multiplyScalar(0.001);
@@ -605,6 +800,7 @@ async function spawnModel(entry) {
   const center = box.getCenter(new THREE.Vector3());
   root.position.sub(new THREE.Vector3(center.x, box.min.y, center.z));
   root.updateMatrixWorld(true);
+  root.userData.home = { p: root.position.clone(), q: root.quaternion.clone(), s: root.scale.clone() };
 
   // Modelin kendi (root) eksenindeki kutusu: olcu etiketi ve kesit bununla.
   const rootInv = root.matrixWorld.clone().invert();
@@ -640,7 +836,7 @@ async function spawnModel(entry) {
   return {
     holder, root, parts, materials, fitScale, longest, localBox,
     bodies: [], opacity: 1, realistic: false, physics: false,
-    explode: 0, explodeTarget: 0,
+    explode: 0, explodeTarget: 0, anim,
     anchor: null, anchorApplied: false, anchorScale: 1,
     entry,
   };
@@ -782,10 +978,15 @@ function buildBodies() {
   if (!m || m.bodies.length) return;
   m.holder.updateMatrixWorld(true);
 
-  for (const part of m.parts) {
-    if (!part.geometry) continue;
-    if (!part.geometry.boundingBox) part.geometry.computeBoundingBox();
-    const local = part.geometry.boundingBox;
+  // Cok parcali modelde tek govde: "parca" modelin kendisi (root), kutusu localBox.
+  const targets = m.parts.length > MAX_PHYSICS_PARTS
+    ? [{ part: m.root, local: m.localBox }]
+    : m.parts.filter((p) => p.geometry).map((p) => {
+      if (!p.geometry.boundingBox) p.geometry.computeBoundingBox();
+      return { part: p, local: p.geometry.boundingBox };
+    });
+
+  for (const { part, local } of targets) {
     const ws = part.getWorldScale(new THREE.Vector3());
     const size = local.getSize(new THREE.Vector3()).multiply(ws);
     const centre = local.getCenter(new THREE.Vector3()).multiply(ws);
@@ -953,6 +1154,7 @@ function bringToFront() {
   removeBodies();
   m.physics = false;
   m.explode = m.explodeTarget = 0;
+  restoreHome(m.root);
   for (const p of m.parts) {
     const h = p.userData.home;
     if (!h) continue;
@@ -978,11 +1180,71 @@ function bringToFront() {
   state.menu?.invalidate();
 }
 
+function restoreHome(o) {
+  const h = o.userData.home;
+  if (!h) return;
+  o.position.copy(h.p);
+  o.quaternion.copy(h.q);
+  o.scale.copy(h.s);
+}
+
+// --- animasyon ----------------------------------------------------------------
+
+function toggleAnimation() {
+  const m = state.model;
+  const a = m && m.anim;
+  if (!a) return;
+  if (m.physics) togglePhysics();
+  if (m.explodeTarget > 0) setExplode(m, 0, true);
+  if (!a.playing && a.action.time >= a.duration - 1e-3) seekAnimation(0);
+  a.playing = !a.playing;
+  a.action.paused = !a.playing;
+  state.menu?.invalidate();
+  desktop?.refresh();
+}
+
+function seekAnimation(t) {
+  const m = state.model;
+  const a = m && m.anim;
+  if (!a) return;
+  if (m.physics) togglePhysics();
+  a.action.time = THREE.MathUtils.clamp(t, 0, a.duration);
+  a.action.paused = !a.playing;
+  a.mixer.update(0);
+  state.menu?.invalidate();
+}
+
+let _animUiAt = 0;
+
+function updateAnimations(dt, time) {
+  for (const m of state.models) {
+    const a = m.anim;
+    if (!a || !a.playing || m.physics) continue;
+    a.mixer.update(dt);
+    if (a.action.time >= a.duration - 1e-4) {
+      a.playing = false;
+      a.action.paused = true;
+      state.menu?.invalidate();
+      desktop?.refresh();
+    }
+    // Menu/ilerleme cubugu saniyede ~5 kez: her karede canvas cizmek pahali.
+    if (time - _animUiAt > 200) {
+      _animUiAt = time;
+      state.menu?.invalidate();
+      desktop?.refreshAnimation();
+    }
+  }
+}
+
 // --- parcalari ayirma --------------------------------------------------------
 
 function toggleExplode() {
   const m = state.model;
   if (!m) return;
+  if (m.anim && m.anim.playing) {
+    m.anim.playing = false;
+    m.anim.action.paused = true;
+  }
   if (m.physics) {
     removeBodies();
     m.physics = false;
@@ -2053,6 +2315,10 @@ function buildMenu() {
       sectionT: state.sectionT,
       anchorSaved: Boolean(state.model && loadAnchorMap()[state.model.entry.url]),
       modelCount: state.models.length,
+      anim: state.model && state.model.anim ? {
+        playing: state.model.anim.playing,
+        progress: state.model.anim.action.time / (state.model.anim.duration || 1),
+      } : null,
     }),
     actions: {
       toggleView,
@@ -2086,6 +2352,8 @@ function buildMenu() {
       cycleSection,
       sectionStep,
       saveAnchor: requestAnchorSave,
+      animToggle: toggleAnimation,
+      animRestart: () => seekAnimation(0),
       forgetAnchor,
     },
   });
@@ -2102,16 +2370,14 @@ async function enterAR() {
   el.enter.disabled = true;
   el.hint.textContent = "Model yukleniyor…";
 
-  let model;
   try {
-    buildScene();
-    buildWorld();
-    model = await spawnModel(entry);
+    if (!state.model || state.model.entry.url !== entry.url) await showModel(entry);
   } catch (err) {
     el.hint.textContent = "Model yuklenemedi: " + err.message;
     el.enter.disabled = false;
     return;
   }
+  const model = state.model;
 
   let session;
   try {
@@ -2139,30 +2405,25 @@ async function enterAR() {
   state.session = session;
   state.inputs = [];
   state.occlusion = settings.depth ? new SoftOcclusion(state.renderer) : null;
-  if (state.occlusion) for (const mat of model.materials) state.occlusion.patch(mat);
-  state.surfaces = new Map();
-  state.patches = [];
+  if (state.occlusion) for (const m of state.models) for (const mat of m.materials) state.occlusion.patch(mat);
+  resetRoomSurfaces();
   state.surfaceHintShown = false;
   state.sessionStart = 0;
   state.grab = null;
   state.twoHand = null;
-  state.renderer.domElement.style.display = "";
+  desktop.suspend();
+  state.renderer.setClearColor(0x000000, 0); // passthrough gorunsun
   await state.renderer.xr.setSession(session);
 
-  state.models = [model];
+  for (const m of state.models) {
+    m.realistic = false;
+    state.model = m;
+    setOpacity(GHOST_OPACITY);
+  }
   state.model = model;
-  state.scene.add(model.holder);
-  setOpacity(GHOST_OPACITY);
   state.needsPlacement = true;
-
-  state.shadow = new ShadowCatcher(state.scene, state.renderer, state.sun);
-  state.ruler = new Ruler(state.scene);
   state.rulerInput = null;
-  state.section = new Section();
-  state.sectionMode = "off";
-  state.dimsLabel = new Label(0.2);
-  state.scene.add(state.dimsLabel.mesh);
-  state.wristButton = new WristButton(state.scene);
+  state.ruler.clear();
   state.anchorRequest = null;
   state.menuOpen = false;
 
@@ -2184,17 +2445,31 @@ async function enterAR() {
 
 function onSessionEnd() {
   state.renderer.setAnimationLoop(null);
-  state.renderer.domElement.style.display = "none";
-  for (const m of state.models) disposeModel(m);
-  state.models = [];
-  state.model = null;
+  for (const input of state.inputs) {
+    input.occluder.dispose();
+    input.pinchAnchor.removeFromParent();
+    for (const t of input.tips || []) t.removeFromParent();
+    removeFingerBody(input);
+  }
+  state.inputs = [];
+  releaseAll();
+  state.menu?.group.removeFromParent();
+  state.menu = null;
+  state.menuOpen = false;
+  state.wristButton.mesh.visible = false;
+  state.reticle.visible = false;
+  state.toast.mesh.visible = false;
+  resetRoomSurfaces();
+  // Yumusak ortme kapanmali: materyaller yamali kalir, doku yokken ortme
+  // acik kalirsa model PC'de gorunmez olur.
+  if (state.occlusion) state.occlusion.uniforms.occOn.value = 0;
+  state.occlusion = null;
   state.session = null;
   state.hitTestSource = null;
-  state.menu = null;
-  state.toast = null;
-  state.occlusion = null;
   el.enter.disabled = false;
   el.hint.textContent = "Oturum kapandi. Tekrar girebilirsin.";
+  desktop.resume();
+  state.renderer.setAnimationLoop(desktop.frame);
   loadCatalog();
 }
 
@@ -2261,6 +2536,7 @@ function onFrame(time, frame) {
     syncPartsFromBodies();
   }
   updateExplode(dt);
+  updateAnimations(dt, time);
 
   // Model hareket ettikten sonra: kesit duzlemi, golge, olculer, cetvel.
   for (const x of state.models) x.holder.updateMatrixWorld(true);
@@ -2276,11 +2552,17 @@ function onFrame(time, frame) {
 
 el.enter.addEventListener("click", enterAR);
 
-buildRenderer();
-window.addEventListener("resize", () => {
-  if (!state.renderer) return;
-  state.renderer.setSize(window.innerWidth, window.innerHeight);
+initScene();
+desktop = initDesktop({
+  state, settings, setSetting, hud,
+  setHead: (p) => _headPos.copy(p),
+  toggleView, setOpacity, setScale, toggleExplode, updateExplode, applySection,
+  togglePhysics, liftAboveFloor, buildBodies, removeBodies, syncPartsFromBodies,
+  updateShadowAndDims, toggleAnimation, seekAnimation, updateAnimations,
+  restoreHome, applyExplode,
+  fitScaleOf: (m) => (m.longest > DEFAULT_SIZE ? DEFAULT_SIZE / m.longest : 1),
 });
+state.renderer.setAnimationLoop(desktop.frame);
 
 checkSupport();
 loadCatalog();

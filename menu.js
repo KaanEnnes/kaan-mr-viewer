@@ -42,11 +42,11 @@ export class WristMenu {
    *   model(): { name, realistic, opacity, scale, physics } | null
    *   catalog(): [{ name, url, ... }], currentUrl(): string
    *   settings(): { throw, push, handStyle, pinch, shadow, dims, ruler, depth, listMode }
-   *   tools(): { exploded, section, sectionT, anchorSaved, modelCount }
+   *   tools(): { exploded, section, sectionT, anchorSaved, modelCount, anim }
    *   actions: { toggleView, opacity(d), scale(f), realSize, fit, physics,
    *              bringFront, exit, load(entry), refresh, setSetting(k, v),
    *              clearRuler, explode, removeModel, cycleSection, sectionStep(d),
-   *              saveAnchor, forgetAnchor }
+   *              saveAnchor, forgetAnchor, animToggle, animRestart }
    * }
    */
   constructor(api) {
@@ -342,6 +342,15 @@ export class WristMenu {
         onPress: a.removeModel },
     );
 
+    if (t.anim) {
+      pair(
+        { id: "anim", kind: "toggle", label: t.anim.playing ? "Animasyon ⏸" : "Animasyon ▶",
+          active: t.anim.playing, onPress: a.animToggle },
+        { id: "anim-restart", kind: "button", label: `Basa sar (%${Math.round(t.anim.progress * 100)})`,
+          onPress: a.animRestart },
+      );
+    }
+
     const sectionNames = { off: "Kapali", y: "Yatay", x: "Dikey (X)", z: "Dikey (Z)" };
     add({ id: "l-sec", kind: "label", label: "Kesit", x: L, y, w: 200, h });
     add({ id: "section", kind: "toggle", label: sectionNames[t.section], active: t.section !== "off",
@@ -361,11 +370,9 @@ export class WristMenu {
     );
 
     add({ id: "l-depth", kind: "label", label: "Gercek nesne ortme", x: L, y, w: 260, h });
-    add({ id: "depth", kind: "toggle", label: s.depth ? "Acik*" : "Kapali", active: s.depth,
+    // Ortme oturum baslarken istenir; degisiklik sonraki giriste gecerli.
+    add({ id: "depth", kind: "toggle", label: s.depth ? "Acik (sonraki giris)" : "Kapali", active: s.depth,
       x: 300, y, w: R - 300, h, onPress: () => a.setSetting("depth", !s.depth) });
-    y += row;
-    add({ id: "depth-note", kind: "text", label: "* ortme sonraki giriste devreye girer",
-      x: L, y: y - 6, w: R - L, h: 30 });
   }
 
   layoutHands(add, a, top) {
