@@ -14,6 +14,7 @@ import {
   INDEX_TIP, THUMB_TIP, jointWorld, palmNormal, palmCentre, VelocityTracker, HandOccluder,
 } from "./hands.js";
 import { WristMenu } from "./menu.js";
+import { Label, ShadowCatcher, Ruler, Section, SECTION_MODES, WristButton } from "./tools.js";
 
 // --- sabitler ---------------------------------------------------------------
 
@@ -41,6 +42,11 @@ const TWO_HAND_MAX_STEP = 1.06;
 const HAND_LOST_RELEASE_MS = 300;
 // Cimdik bu kadar kare ust uste gorulmeden baslamaz (tek karelik izleme hatasi).
 const PINCH_CONFIRM_FRAMES = 2;
+// Parcalari ayirinca her parca merkezden uzakligi orani kadar daha acilir.
+const EXPLODE_FACTOR = 0.9;
+const EXPLODE_SPEED = 3;         // saniyede tamamlanan oran
+// Kalici konumlar: model adresi -> { uuid, scale }
+const ANCHOR_STORAGE = "kaan-mr-viewer.anchors";
 // Oda yuzeylerinden (masa, zemin, duvar) kurulan fizik kutularinin kalinligi.
 // Ince olursa hizli dusen parca yuzeyin icinden gecebiliyor.
 const SURFACE_THICKNESS = 0.05;  // metre
@@ -78,7 +84,16 @@ const state = {
   patches: [],          // hit-test'ten ogrenilen yuzey yamalari
   surfaceHintShown: false,
   debugText: "",
-  menuPinned: false,
+  models: [],         // sahnedeki tum modeller; state.model secili olan
+  shadow: null,
+  ruler: null,
+  rulerInput: null,
+  section: null,
+  sectionMode: "off",
+  sectionT: 0.5,
+  dimsLabel: null,
+  wristButton: null,
+  anchorRequest: null,
   lastTime: 0,
 };
 
@@ -339,7 +354,10 @@ document.addEventListener("visibilitychange", () => {
 // --- ayarlar ----------------------------------------------------------------
 
 const SETTINGS_STORAGE = "kaan-mr-viewer.settings";
-const DEFAULT_SETTINGS = { throw: true, push: true, handStyle: "tips", pinch: "normal" };
+const DEFAULT_SETTINGS = {
+  throw: true, push: true, handStyle: "tips", pinch: "normal",
+  shadow: true, dims: false, ruler: false, depth: false, listMode: "replace",
+};
 
 // Cimdik baslangic / bitis mesafeleri (basparmak ucu - isaret parmagi ucu).
 // Bitis esigi daha buyuk: parmaklar hafif acilinca tutus hemen kopmasin.
@@ -369,11 +387,18 @@ function setSetting(key, value) {
   saveSettings();
   if (key === "handStyle") for (const input of state.inputs) applyHandStyle(input);
   if (key === "push" && !value) removeFingerBodies();
+  if (key === "ruler") state.ruler?.clear();
+  const onOff = value ? "acik" : "kapali";
   const labels = {
-    throw: `Firlatma ${value ? "acik" : "kapali"}`,
-    push: `Parmakla itme ${value ? "acik" : "kapali"}`,
+    throw: `Firlatma ${onOff}`,
+    push: `Parmakla itme ${onOff}`,
     handStyle: "El gorunumu degisti",
     pinch: "Cimdik hassasiyeti degisti",
+    shadow: `Golge ${onOff}`,
+    dims: `Olculer ${onOff}`,
+    ruler: value ? "Cetvel: iki noktaya cimdik / tetik" : "Cetvel kapali",
+    depth: value ? "Gercek nesne ortme sonraki giriste acilir" : "Ortme sonraki giriste kapanir",
+    listMode: value === "add" ? "Listeden secilen model sahneye eklenir" : "Listeden secilen model degistirilir",
   };
   hud(labels[key] || "Ayar kaydedildi");
   state.menu?.invalidate();
@@ -393,6 +418,7 @@ function buildScene() {
   const sun = new THREE.DirectionalLight(0xffffff, 1.5);
   sun.position.set(1, 3, 1.5);
   scene.add(sun);
+  state.sun = sun;
 
   const reticle = new THREE.Mesh(
     new THREE.RingGeometry(0.05, 0.065, 32).rotateX(-Math.PI / 2),
@@ -419,6 +445,7 @@ function buildRenderer() {
   renderer.setClearAlpha(0);
   renderer.xr.enabled = true;
   renderer.xr.setReferenceSpaceType("local-floor");
+  renderer.localClippingEnabled = true; // kesit duzlemi
   document.body.appendChild(renderer.domElement);
   renderer.domElement.style.display = "none";
   state.renderer = renderer;
@@ -565,6 +592,14 @@ async function spawnModel(entry) {
   const box = new THREE.Box3().setFromObject(root);
   const center = box.getCenter(new THREE.Vector3());
   root.position.sub(new THREE.Vector3(center.x, box.min.y, center.z));
+  root.updateMatrixWorld(true);
+
+  // Modelin kendi (root) eksenindeki kutusu: olcu etiketi ve kesit bununla.
+  const rootInv = root.matrixWorld.clone().invert();
+  const localBox = new THREE.Box3().setFromObject(root).applyMatrix4(rootInv);
+  computeExplodeOffsets(parts, rootInv, localBox.getCenter(new THREE.Vector3()));
+
+  root.traverse((o) => { if (o.isMesh) o.castShadow = true; });
 
   const holder = new THREE.Group();
   holder.add(root);
@@ -590,14 +625,37 @@ async function spawnModel(entry) {
   });
 
   return {
-    holder, root, parts, materials, fitScale, longest,
+    holder, root, parts, materials, fitScale, longest, localBox,
     bodies: [], opacity: 1, realistic: false, physics: false,
+    explode: 0, explodeTarget: 0,
+    anchor: null, anchorApplied: false, anchorScale: 1,
     entry,
   };
 }
 
+/**
+ * Her parca icin "ayrilma" ofsetini hesaplar: parcanin merkezinden modelin
+ * merkezine olan vektor, parcanin kendi ebeveyn ekseninde. Ic ice gruplar
+ * olabildigi icin root ekseninden ebeveyn eksenine cevriliyor.
+ */
+function computeExplodeOffsets(parts, rootInv, modelCentre) {
+  const toRoot = new THREE.Matrix4();
+  const m3 = new THREE.Matrix3();
+  for (const part of parts) {
+    if (!part.geometry) continue;
+    if (!part.geometry.boundingBox) part.geometry.computeBoundingBox();
+    const c = part.geometry.boundingBox.getCenter(new THREE.Vector3())
+      .applyMatrix4(part.matrixWorld).applyMatrix4(rootInv);
+    const d = c.sub(modelCentre);
+    toRoot.multiplyMatrices(rootInv, part.parent.matrixWorld).invert();
+    m3.setFromMatrix4(toRoot);
+    part.userData.explode = d.applyMatrix3(m3).multiplyScalar(EXPLODE_FACTOR);
+  }
+}
+
 function disposeModel(m) {
   if (!m) return;
+  if (state.section?.model === m) state.section.detach();
   removeBodies(m);
   m.holder.removeFromParent();
   m.holder.traverse((o) => {
@@ -606,25 +664,37 @@ function disposeModel(m) {
   for (const mat of m.materials) mat.dispose();
 }
 
-/** Oturum icinde modeli degistirir; yeni model eskisinin yerinde belirir. */
+/**
+ * Listeden secilen modeli yukler. "Degistir" modunda secili modelin yerine
+ * gecer; "Ekle" modunda sahneye ek model olarak onune konur ve secilir.
+ */
 async function switchModel(entry) {
   if (state.loading) return;
   state.loading = true;
+  const adding = settings.listMode === "add" || !state.model;
   hud(`Yukleniyor: ${entry.name}`, 6000);
   state.menu?.setStatus("Yukleniyor…");
   try {
     const next = await spawnModel(entry);
     const old = state.model;
     releaseAll();
-    if (old) {
+    if (adding) {
+      state.models.push(next);
+      state.scene.add(next.holder);
+      setActive(next);
+      setOpacity(GHOST_OPACITY);
+      bringToFront();
+    } else {
       next.holder.position.copy(old.holder.position);
       next.holder.quaternion.copy(old.holder.quaternion);
+      state.models[state.models.indexOf(old)] = next;
+      state.scene.add(next.holder);
+      state.model = null;           // setActive eskisini dondurmaya calismasin
+      disposeModel(old);
+      setActive(next);
+      setOpacity(GHOST_OPACITY);
     }
-    disposeModel(old);
-    state.model = next;
-    state.scene.add(next.holder);
-    setOpacity(GHOST_OPACITY);
-    if (!old) state.needsPlacement = true;
+    restoreAnchor(next);
     hud(`${entry.name}${next.fitScale < 1 ? ` · %${Math.round(next.fitScale * 100)} boyut` : ""}`);
     state.menu?.setStatus("");
   } catch (err) {
@@ -634,6 +704,49 @@ async function switchModel(entry) {
     state.loading = false;
     state.menu?.invalidate();
   }
+}
+
+/**
+ * Secili modeli degistirir. Fizik, kesit ve tutma yalnizca secili modelde
+ * calisir; secimden cikan model oldugu yerde donar.
+ */
+function setActive(m) {
+  const old = state.model;
+  if (old === m) return;
+  releaseAll();
+  if (old) {
+    removeBodies(old);
+    old.physics = false;
+  }
+  state.model = m;
+  applySection();
+  state.menu?.invalidate();
+}
+
+/** Noktaya (tutma margini dahil) en yakin modeli bulur; secili olan onceliklidir. */
+function modelAt(point) {
+  const box = new THREE.Box3();
+  const order = state.model ? [state.model, ...state.models.filter((x) => x !== state.model)] : state.models;
+  for (const m of order) {
+    box.setFromObject(m.holder).expandByScalar(GRAB_MARGIN);
+    if (box.containsPoint(point)) return m;
+  }
+  return null;
+}
+
+function removeActiveModel() {
+  const m = state.model;
+  if (!m) return;
+  if (state.models.length <= 1) {
+    hud("Sahnede tek model var; degistirmek icin Liste'yi kullan");
+    return;
+  }
+  releaseAll();
+  state.models.splice(state.models.indexOf(m), 1);
+  state.model = null;
+  disposeModel(m);
+  setActive(state.models[state.models.length - 1]);
+  hud("Model kaldirildi");
 }
 
 // --- fizik ------------------------------------------------------------------
@@ -672,7 +785,8 @@ function buildBodies() {
     // davransin diye plastige yakin bir yogunluk.
     const mass = Math.max(size.x * size.y * size.z * 400, 0.01);
 
-    const body = new CANNON.Body({ mass, shape: new CANNON.Box(half) });
+    // Grup 2: golge isini (maske 1) model govdelerini gormez, sadece yuzeyleri.
+    const body = new CANNON.Body({ mass, shape: new CANNON.Box(half), collisionFilterGroup: 2 });
     part.getWorldQuaternion(_q);
     part.getWorldPosition(_v).add(_v2.copy(centre).applyQuaternion(_q));
     body.position.set(_v.x, _v.y, _v.z);
@@ -744,6 +858,7 @@ function togglePhysics() {
   if (!m) return;
   m.physics = !m.physics;
   if (m.physics) {
+    if (m.explode > 0) setExplode(m, 0, true);
     liftAboveFloor();
     removeBodies();
     buildBodies();
@@ -776,6 +891,7 @@ function bringToFront() {
   releaseAll();
   removeBodies();
   m.physics = false;
+  m.explode = m.explodeTarget = 0;
   for (const p of m.parts) {
     const h = p.userData.home;
     if (!h) continue;
@@ -799,6 +915,303 @@ function bringToFront() {
   const bottom = Math.max(_v.y - 0.3 - height / 2, 0.02);
   m.holder.position.y = bottom - box.min.y;
   state.menu?.invalidate();
+}
+
+// --- parcalari ayirma --------------------------------------------------------
+
+function toggleExplode() {
+  const m = state.model;
+  if (!m) return;
+  if (m.physics) {
+    removeBodies();
+    m.physics = false;
+  }
+  setExplode(m, m.explodeTarget > 0 ? 0 : 1);
+  hud(m.explodeTarget > 0 ? "Parcalar ayriliyor" : "Parcalar toplaniyor", 900);
+  state.menu?.invalidate();
+}
+
+function setExplode(m, target, instant = false) {
+  m.explodeTarget = target;
+  if (instant) {
+    m.explode = target;
+    applyExplode(m);
+  }
+}
+
+/** Parcalari ilk yerleri + ayirma ofseti * oran konumuna koyar. */
+function applyExplode(m) {
+  for (const p of m.parts) {
+    const h = p.userData.home;
+    if (!h) continue;
+    p.position.copy(h.p);
+    p.quaternion.copy(h.q);
+    p.scale.copy(h.s);
+    if (p.userData.explode && m.explode > 0) p.position.addScaledVector(p.userData.explode, m.explode);
+  }
+}
+
+function updateExplode(dt) {
+  for (const m of state.models) {
+    if (m.physics || m.explode === m.explodeTarget) continue;
+    const step = EXPLODE_SPEED * dt;
+    m.explode = m.explode < m.explodeTarget
+      ? Math.min(m.explodeTarget, m.explode + step)
+      : Math.max(m.explodeTarget, m.explode - step);
+    applyExplode(m);
+  }
+}
+
+// --- kesit ------------------------------------------------------------------
+
+function applySection() {
+  state.section?.apply(state.model, state.sectionMode, state.sectionT);
+}
+
+function cycleSection() {
+  const i = SECTION_MODES.indexOf(state.sectionMode);
+  state.sectionMode = SECTION_MODES[(i + 1) % SECTION_MODES.length];
+  applySection();
+  state.menu?.invalidate();
+}
+
+function sectionStep(d) {
+  state.sectionT = THREE.MathUtils.clamp(state.sectionT + d, 0.02, 0.98);
+  applySection();
+  state.menu?.invalidate();
+}
+
+// --- kalici konum (WebXR anchors) --------------------------------------------
+
+function loadAnchorMap() {
+  try { return JSON.parse(localStorage.getItem(ANCHOR_STORAGE) || "{}"); } catch { return {}; }
+}
+
+function saveAnchorMap(map) {
+  try { localStorage.setItem(ANCHOR_STORAGE, JSON.stringify(map)); } catch { /* yok say */ }
+}
+
+/** Kayit bir sonraki karede yapilir: anchor olusturmak aktif bir XRFrame ister. */
+function requestAnchorSave() {
+  if (!state.model) return;
+  if (typeof XRFrame === "undefined" || !XRFrame.prototype.createAnchor) {
+    hud("Bu tarayici kalici konumu desteklemiyor", 3000);
+    return;
+  }
+  state.anchorRequest = state.model;
+}
+
+const _anchorPos = new THREE.Vector3();
+const _anchorQuat = new THREE.Quaternion();
+
+async function processAnchorRequest(frame) {
+  const m = state.anchorRequest;
+  state.anchorRequest = null;
+  const refSpace = state.renderer.xr.getReferenceSpace();
+  m.holder.updateMatrixWorld(true);
+  m.holder.matrixWorld.decompose(_anchorPos, _anchorQuat, _v);
+  try {
+    const anchor = await frame.createAnchor(new XRRigidTransform(
+      { x: _anchorPos.x, y: _anchorPos.y, z: _anchorPos.z, w: 1 },
+      { x: _anchorQuat.x, y: _anchorQuat.y, z: _anchorQuat.z, w: _anchorQuat.w }), refSpace);
+    if (!anchor.requestPersistentHandle) {
+      anchor.delete?.();
+      hud("Bu tarayici kalici konumu desteklemiyor", 3000);
+      return;
+    }
+    const uuid = await anchor.requestPersistentHandle();
+    const map = loadAnchorMap();
+    const old = map[m.entry.url];
+    if (old && old.uuid !== uuid) state.session?.deletePersistentAnchor?.(old.uuid).catch(() => {});
+    map[m.entry.url] = { uuid, scale: m.holder.scale.x };
+    saveAnchorMap(map);
+    m.anchor = anchor;
+    m.anchorApplied = true;
+    hud("Konum kaydedildi: bir dahaki giriste burada olacak", 3000);
+  } catch (err) {
+    hud("Konum kaydedilemedi: " + err.message, 3000);
+  }
+  state.menu?.invalidate();
+}
+
+/** Bu model icin kayitli konum varsa geri yukler (yerlestirme sonraki karede). */
+async function restoreAnchor(m) {
+  const saved = loadAnchorMap()[m.entry.url];
+  if (!saved || !state.session?.restorePersistentAnchor) return;
+  try {
+    m.anchor = await state.session.restorePersistentAnchor(saved.uuid);
+    m.anchorScale = saved.scale || m.holder.scale.x;
+    m.anchorApplied = false;
+  } catch {
+    // Anchor silinmis ya da baska odada: normal yerlestirmeyle devam.
+  }
+}
+
+function applyAnchors(frame) {
+  const refSpace = state.renderer.xr.getReferenceSpace();
+  for (const m of state.models) {
+    if (!m.anchor || m.anchorApplied) continue;
+    const pose = frame.getPose(m.anchor.anchorSpace, refSpace);
+    if (!pose) continue;
+    const { position: p, orientation: o } = pose.transform;
+    m.holder.position.set(p.x, p.y, p.z);
+    m.holder.quaternion.set(o.x, o.y, o.z, o.w);
+    m.holder.scale.setScalar(m.anchorScale);
+    m.anchorApplied = true;
+    if (m === state.model) removeBodies();
+    hud(`${m.entry.name.replace(/\.(glb|gltf|3mf)$/i, "")} kayitli yerinde`, 2000);
+  }
+}
+
+function forgetAnchor() {
+  const m = state.model;
+  if (!m) return;
+  const map = loadAnchorMap();
+  const saved = map[m.entry.url];
+  if (!saved) {
+    hud("Bu modelin kayitli konumu yok");
+    return;
+  }
+  state.session?.deletePersistentAnchor?.(saved.uuid).catch(() => {});
+  delete map[m.entry.url];
+  saveAnchorMap(map);
+  m.anchor = null;
+  hud("Kayitli konum silindi");
+  state.menu?.invalidate();
+}
+
+// --- golge ve olcu etiketi ----------------------------------------------------
+
+const _rayFrom = new CANNON.Vec3();
+const _rayTo = new CANNON.Vec3();
+const _rayResult = new CANNON.RaycastResult();
+const _box = new THREE.Box3();
+
+/** Modelin altindaki yuzeyin (masa, yama, zemin) yuksekligi. */
+function supportHeightBelow(holder) {
+  _box.setFromObject(holder);
+  const c = _box.getCenter(_v);
+  _rayFrom.set(c.x, _box.min.y + 0.02, c.z);
+  _rayTo.set(c.x, -1, c.z);
+  _rayResult.reset();
+  // Maske 1: sadece sabit yuzeyler; model (2) ve parmak (4) govdeleri degil.
+  state.world.raycastClosest(_rayFrom, _rayTo, { collisionFilterMask: 1, skipBackfaces: true }, _rayResult);
+  return _rayResult.hasHit ? _rayResult.hitPointWorld.y : 0;
+}
+
+function updateShadowAndDims() {
+  const m = state.model;
+  state.shadow.update(m && m.holder, m ? supportHeightBelow(m.holder) : 0, settings.shadow);
+
+  if (!settings.dims || !m) {
+    state.dimsLabel.hide();
+    return;
+  }
+  // Olculer modelin kendi ekseninde, gercek (olcekli) boyutla: dondurunce degismez.
+  const size = m.localBox.getSize(_v2).multiplyScalar(m.holder.scale.x * 100);
+  const f = (v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
+  state.dimsLabel.set(`${f(size.x)} × ${f(size.z)} × ${f(size.y)} cm`);
+  _box.setFromObject(m.holder);
+  const top = _box.getCenter(_v);
+  top.y = _box.max.y + 0.045;
+  state.dimsLabel.place(top, _headPos);
+}
+
+// --- cetvel ------------------------------------------------------------------
+
+function rulerPoint(input, out) {
+  if (input.isHand) return out.copy(input.tip);
+  return input.controller.getWorldPosition(out);
+}
+
+function addRulerPoint(input) {
+  state.ruler.addPoint(rulerPoint(input, _v));
+  state.rulerInput = input;
+  if (state.ruler.points.length === 2) {
+    const cm = state.ruler.points[0].distanceTo(state.ruler.points[1]) * 100;
+    hud(`${cm.toFixed(1)} cm`, 2500);
+  }
+}
+
+const _rulerPreview = new THREE.Vector3();
+
+function updateRuler() {
+  const inp = state.rulerInput;
+  const preview = inp && inp.source && inp.tracked ? rulerPoint(inp, _rulerPreview) : null;
+  state.ruler.update(settings.ruler, preview, _headPos);
+}
+
+// --- menu acma (sol bilek dugmesi / Y) ---------------------------------------
+
+/**
+ * Menuyu acar/kapatir. Acilinca sag elin (ya da sag kumandanin) yaninda
+ * belirir ve orada sabit kalir: el hareket etse de kacmaz, iki elle de
+ * dokunulabilir.
+ */
+function toggleMenu() {
+  const menu = state.menu;
+  if (menu.visible) {
+    menu.setVisible(false);
+    return;
+  }
+  const right = state.inputs.find((i) => i.source && i.handedness === "right" && i.tracked);
+  if (right) {
+    const base = right.isHand
+      ? (palmCentre(right.hand, _centre) || _centre.copy(right.point))
+      : right.grip.getWorldPosition(_centre);
+    menu.group.position.copy(base);
+    menu.group.position.y += 0.2;
+    // Biraz kullaniciya dogru: el ile yuz arasinda rahat bir uzaklik.
+    menu.group.position.lerp(_headPos, 0.15);
+  } else {
+    state.renderer.xr.getCamera().getWorldDirection(_v2);
+    _v2.y = 0;
+    _v2.normalize();
+    menu.group.position.copy(_headPos).addScaledVector(_v2, 0.45);
+    menu.group.position.y -= 0.15;
+  }
+  menu.group.lookAt(_headPos);
+  menu.setVisible(true);
+}
+
+let _wristShown = false;
+
+/** Sol bilek dugmesi: sol avuc kullaniciya donunce belirir, sag isaret parmagi basar. */
+function updateWristButton() {
+  const btn = state.wristButton;
+  const left = state.inputs.find((i) => i.source && i.isHand && i.handedness === "left" && i.tracked);
+  const normal = left && palmNormal(left.hand, "left", _normal);
+  const wrist = normal && jointWorld(left.hand, "wrist", _centre);
+  const knuckle = wrist && jointWorld(left.hand, "middle-finger-phalanx-proximal", _v2);
+  if (!knuckle) {
+    btn.mesh.visible = _wristShown = false;
+    return;
+  }
+  const facing = normal.dot(_v.subVectors(_headPos, wrist).normalize());
+  if (facing > 0.35) _wristShown = true;
+  else if (facing < 0.15) _wristShown = false;
+  btn.mesh.visible = _wristShown;
+  if (!_wristShown) return;
+
+  // Bilegin ic tarafi, onkola dogru: saat bakar gibi.
+  const toFingers = knuckle.sub(wrist).normalize();
+  btn.mesh.position.copy(wrist).addScaledVector(toFingers, -0.035).addScaledVector(normal, 0.02);
+  btn.mesh.lookAt(_headPos);
+
+  const right = state.inputs.find((i) => i.source && i.isHand && i.handedness === "right" && i.tracked);
+  if (right && btn.poke(right.tip)) toggleMenu();
+}
+
+/** Kumanda isini menude gezdirir (tum kumandalar). */
+function updateMenuHover() {
+  const menu = state.menu;
+  if (!menu.visible) return;
+  let hit = null;
+  for (const inp of state.inputs) {
+    if (inp.source && !inp.isHand) hit = menuRayHit(inp) || hit;
+  }
+  if (hit) menu.hoverAt(hit);
+  else if (!state.inputs.some((i) => i.pokingMenu)) menu.hoverAt(null);
 }
 
 // --- girisler (kumanda + el) ------------------------------------------------
@@ -897,26 +1310,23 @@ function onSelect(input) {
     state.menu.clickAt(hit);
     return;
   }
+  if (settings.ruler) {
+    addRulerPoint(input);
+    return;
+  }
   placeAtReticle();
 }
 
 function menuRayHit(input) {
-  if (!state.menu?.visible || isMenuOwner(input)) return null;
+  if (!state.menu?.visible) return null;
   input.controller.getWorldPosition(_v);
   input.controller.getWorldDirection(_v2).negate(); // three'de kumanda -Z'ye bakar
   return state.menu.rayHit(_v, _v2);
 }
 
-function isMenuOwner(input) {
-  return input.handedness === "right";
-}
 
-function nearModel(point) {
-  const m = state.model;
-  if (!m) return false;
-  const box = new THREE.Box3().setFromObject(m.holder).expandByScalar(GRAB_MARGIN);
-  return box.containsPoint(point);
-}
+
+
 
 const _tipA = new THREE.Vector3();
 const _tipB = new THREE.Vector3();
@@ -957,8 +1367,8 @@ function updateHand(input, time) {
   input.pinchAnchor.position.copy(input.point);
   if (wrist && wrist.visible) wrist.getWorldQuaternion(input.pinchAnchor.quaternion);
 
-  // Menu: menu sahibi olmayan elin isaret parmagi dokunur.
-  input.pokingMenu = !isMenuOwner(input) && state.menu.poke(input.i, index);
+  // Menu acikken iki elin de isaret parmagi dokunabilir.
+  input.pokingMenu = state.menu.poke(input.i, index);
 
   const [startDist, endDist] = PINCH_THRESHOLDS[settings.pinch] || PINCH_THRESHOLDS.normal;
   const dist = thumb.distanceTo(index);
@@ -983,9 +1393,14 @@ function updateHand(input, time) {
 }
 
 function onPinchStart(input) {
-  const near = nearModel(input.point);
-  if (near) {
-    grabWith(input);
+  if (settings.ruler) {
+    addRulerPoint(input);
+    return;
+  }
+  const target = modelAt(input.point);
+  if (target) {
+    if (!state.grab) setActive(target);
+    if (target === state.model) grabWith(input);
   } else if (!state.grab) {
     placeAtReticle();
   }
@@ -993,59 +1408,7 @@ function onPinchStart(input) {
   // iki elle olceklemeyi baslatip modeli bir anda buyutuyordu.
 }
 
-/** Sag avuc kullaniciya donunce menu acilir, avucun ustunde durur. */
-function updateMenuPlacement() {
-  const menu = state.menu;
-  const owner = state.inputs.find((inp) => isMenuOwner(inp) && inp.source);
-  const cam = state.renderer.xr.getCamera();
-  cam.getWorldPosition(_headPos);
 
-  if (!owner) {
-    menu.setVisible(false);
-    return;
-  }
-
-  if (owner.isHand) {
-    const normal = owner.tracked && palmNormal(owner.hand, "right", _normal);
-    const centre = normal && palmCentre(owner.hand, _centre);
-    if (!normal || !centre) {
-      menu.setVisible(false);
-      return;
-    }
-    const facing = normal.dot(_v.subVectors(_headPos, centre).normalize());
-    const someonePoking = state.inputs.some((inp) => inp.pokingMenu);
-    // Avuc yuze donukse ya da yukari bakiyorsa acilir. Acma/kapama esikleri
-    // farkli: sinirda titreyip yanip sonmesin.
-    const open = facing > 0.4 || normal.y > 0.75;
-    const closed = facing < 0.1 && normal.y < 0.5;
-    if (open) menu.setVisible(true);
-    else if (closed && !someonePoking) menu.setVisible(false);
-    if (DEBUG) state.debugText = `avuc→yuz ${facing.toFixed(2)} yukari ${normal.y.toFixed(2)}`;
-    if (!menu.visible) return;
-    // Paneli avucun ustune kaldir ve yuzunu kullaniciya cevir. Dokunurken
-    // yerinde tutuluyor, yoksa parmak iterken panel kacar.
-    if (!someonePoking) {
-      menu.group.position.copy(centre).addScaledVector(normal, 0.03);
-      menu.group.position.y += 0.19;
-      menu.group.lookAt(_headPos);
-    }
-  } else {
-    // Kumanda: el gibi, avuc tarafini kendine cevirince acilir. Grip uzayinda
-    // sag elde +X elin sirtindan disari bakar; avuc yonu -X.
-    // Sag cubuga basinca menu sabitlenir (cevirmeden acik kalir).
-    owner.grip.getWorldPosition(_centre);
-    _normal.set(-1, 0, 0).applyQuaternion(owner.grip.getWorldQuaternion(_q)).normalize();
-    const facing = _normal.dot(_v.subVectors(_headPos, _centre).normalize());
-    const aiming = state.inputs.some((inp) => inp !== owner && inp.source && !inp.isHand && menuRayHit(inp));
-    if (state.menuPinned || facing > 0.45) menu.setVisible(true);
-    else if (facing < 0.15 && !aiming) menu.setVisible(false);
-    if (DEBUG) state.debugText = `kumanda avuc→yuz ${facing.toFixed(2)}`;
-    if (!menu.visible || aiming) return;
-    menu.group.position.copy(_centre).addScaledVector(_normal, 0.04);
-    menu.group.position.y += 0.17;
-    menu.group.lookAt(_headPos);
-  }
-}
 
 /** Kumanda dugmeleri ve cubugu. */
 function updateController(input, dt, time) {
@@ -1053,13 +1416,6 @@ function updateController(input, dt, time) {
   input.grip.getWorldPosition(input.point);
   input.vel.push(time, input.point);
   input.tracked = true;
-
-  // Menu hover: kumanda isi paneli gosteriyorsa
-  const hit = menuRayHit(input);
-  if (hit) state.menu.hoverAt(hit);
-  else if (!isMenuOwner(input) && state.menu.visible && !state.inputs.some((i) => i.pokingMenu)) {
-    state.menu.hoverAt(null);
-  }
 
   if (!gp) return;
   const m = state.model;
@@ -1072,15 +1428,9 @@ function updateController(input, dt, time) {
   const a = buttons[4] && buttons[4].pressed;
   const b = buttons[5] && buttons[5].pressed;
   const grip = buttons[1] && buttons[1].pressed;
-  const stickClick = buttons[3] && buttons[3].pressed;
   const prev = input.prev;
 
   if (input.handedness === "right") {
-    if (stickClick && !prev.stickClick) {
-      state.menuPinned = !state.menuPinned;
-      state.menu.setVisible(state.menuPinned);
-      hud(state.menuPinned ? "Menu sabit · sol isin + tetik ile sec" : "Menu kapandi");
-    }
     if (m) {
       if (a && !prev.a) toggleView();
       if (b) {
@@ -1093,15 +1443,21 @@ function updateController(input, dt, time) {
     }
   } else if (input.handedness === "left") {
     if (a && !prev.a) togglePhysics();
+    // Y: menu. Quest sol kumandanin menu tusunu tarayiciya vermiyor.
+    if (b && !prev.b) toggleMenu();
   }
 
-  // Kavrama: model kumandaya baglanir, birakinca sahneye geri doner.
-  if (grip && !prev.grip) grabWith(input);
+  // Kavrama: kumandanin yanindaki model (yoksa secili olan) kumandaya baglanir.
+  if (grip && !prev.grip) {
+    const target = modelAt(input.point);
+    if (target && !state.grab) setActive(target);
+    grabWith(input);
+  }
   if (!grip && prev.grip) releaseInput(input);
 
   prev.a = a;
+  prev.b = b;
   prev.grip = grip;
-  prev.stickClick = stickClick;
 }
 
 // --- tutma, iki elle olcekleme, firlatma ------------------------------------
@@ -1247,6 +1603,7 @@ function updateFingerBody(input, time) {
     input.fingerBody = new CANNON.Body({
       type: CANNON.Body.KINEMATIC,
       shape: new CANNON.Sphere(FINGER_RADIUS),
+      collisionFilterGroup: 4,
     });
     input.fingerBody.position.set(input.tip.x, input.tip.y, input.tip.z);
     state.world.addBody(input.fingerBody);
@@ -1512,6 +1869,13 @@ function buildMenu() {
     catalog: () => state.catalog,
     currentUrl: () => state.model?.entry.url,
     settings: () => settings,
+    tools: () => ({
+      exploded: Boolean(state.model && state.model.explodeTarget > 0),
+      section: state.sectionMode,
+      sectionT: state.sectionT,
+      anchorSaved: Boolean(state.model && loadAnchorMap()[state.model.entry.url]),
+      modelCount: state.models.length,
+    }),
     actions: {
       toggleView,
       opacity: (d) => {
@@ -1538,6 +1902,13 @@ function buildMenu() {
         menu.setStatus("");
       },
       setSetting,
+      clearRuler: () => { state.ruler.clear(); hud("Cetvel temizlendi", 900); },
+      explode: toggleExplode,
+      removeModel: removeActiveModel,
+      cycleSection,
+      sectionStep,
+      saveAnchor: requestAnchorSave,
+      forgetAnchor,
     },
   });
   state.scene.add(menu.group);
@@ -1566,13 +1937,21 @@ async function enterAR() {
 
   let session;
   try {
-    session = await navigator.xr.requestSession("immersive-ar", {
-      requiredFeatures: ["local-floor"],
-      optionalFeatures: [
-        "hit-test", "anchors", "plane-detection", "mesh-detection", "hand-tracking", "dom-overlay",
-      ],
-      domOverlay: { root: document.getElementById("hud") },
-    });
+    const optionalFeatures = [
+      "hit-test", "anchors", "plane-detection", "mesh-detection", "hand-tracking", "dom-overlay",
+    ];
+    const init = { requiredFeatures: ["local-floor"], optionalFeatures,
+      domOverlay: { root: document.getElementById("hud") } };
+    if (settings.depth) {
+      // three.js derinlik dokusunu kendisi derinlik tamponuna yaziyor: gercek
+      // nesneler sanal modelin onune gecince onu ortuyor.
+      optionalFeatures.push("depth-sensing");
+      init.depthSensing = {
+        usagePreference: ["gpu-optimized"],
+        dataFormatPreference: ["luminance-alpha", "float32"],
+      };
+    }
+    session = await navigator.xr.requestSession("immersive-ar", init);
   } catch (err) {
     el.hint.textContent = "Passthrough baslatilamadi: " + err.message;
     el.enter.disabled = false;
@@ -1590,13 +1969,25 @@ async function enterAR() {
   state.renderer.domElement.style.display = "";
   await state.renderer.xr.setSession(session);
 
+  state.models = [model];
   state.model = model;
   state.scene.add(model.holder);
   setOpacity(GHOST_OPACITY);
   state.needsPlacement = true;
 
+  state.shadow = new ShadowCatcher(state.scene, state.renderer, state.sun);
+  state.ruler = new Ruler(state.scene);
+  state.rulerInput = null;
+  state.section = new Section();
+  state.sectionMode = "off";
+  state.dimsLabel = new Label(0.2);
+  state.scene.add(state.dimsLabel.mesh);
+  state.wristButton = new WristButton(state.scene);
+  state.anchorRequest = null;
+
   buildMenu();
   setUpInputs();
+  restoreAnchor(model);
 
   try {
     state.viewerSpace = await session.requestReferenceSpace("viewer");
@@ -1613,7 +2004,8 @@ async function enterAR() {
 function onSessionEnd() {
   state.renderer.setAnimationLoop(null);
   state.renderer.domElement.style.display = "none";
-  disposeModel(state.model);
+  for (const m of state.models) disposeModel(m);
+  state.models = [];
   state.model = null;
   state.session = null;
   state.hitTestSource = null;
@@ -1633,14 +2025,17 @@ function onFrame(time, frame) {
     bringToFront();
     const m = state.model;
     hud(m.fitScale < 1
-      ? `%${Math.round(m.fitScale * 100)} boyutta acildi · menu: sag avuc`
-      : "Cimdik: yerlestir · menu: sag avucunu cevir", 4000);
+      ? `%${Math.round(m.fitScale * 100)} boyutta acildi · menu: sol bilek dugmesi / Y`
+      : "Cimdik: yerlestir · menu: sol bilek dugmesi / Y", 4000);
   }
 
   if (frame) {
     if (!state.sessionStart) state.sessionStart = time;
     updateSurfaces(frame, time);
+    applyAnchors(frame);
+    if (state.anchorRequest) processAnchorRequest(frame);
   }
+  state.renderer.xr.getCamera().getWorldPosition(_headPos);
 
   if (frame && state.hitTestSource) {
     const refSpace = state.renderer.xr.getReferenceSpace();
@@ -1662,7 +2057,8 @@ function onFrame(time, frame) {
     else updateController(input, dt, time);
   }
   if (state.twoHand) updateTwoHand();
-  updateMenuPlacement();
+  updateWristButton();
+  updateMenuHover();
   state.menu.update();
   if (DEBUG && time - (state.lastDebug || 0) > 400) {
     state.lastDebug = time;
@@ -1681,6 +2077,13 @@ function onFrame(time, frame) {
     state.world.step(1 / 90, dt, 3);
     syncPartsFromBodies();
   }
+  updateExplode(dt);
+
+  // Model hareket ettikten sonra: kesit duzlemi, golge, olculer, cetvel.
+  for (const x of state.models) x.holder.updateMatrixWorld(true);
+  state.section.update();
+  updateShadowAndDims();
+  updateRuler();
 
   state.renderer.render(state.scene, state.camera);
 }

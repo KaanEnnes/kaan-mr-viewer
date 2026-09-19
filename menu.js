@@ -1,10 +1,11 @@
 /**
- * Sag eldeki menu: model ayarlari, model listesi ve el takibi ayarlari.
+ * VR menusu: model ayarlari, model listesi, araclar ve el takibi ayarlari.
  *
- * Panel bir canvas'a cizilip duzleme doku olarak giydirilir. Etkilesim iki
- * yoldan gelir: el takibinde sol isaret parmagiyla dokunma (poke), kumandada
- * sol kumandanin isini + tetik. Menu kendi durumunu tutmaz; her cizimde
- * degerleri app.js'in verdigi api'den okur.
+ * Sol bilekteki dugmeyle (kumandada Y) acilir, sag elin yaninda belirip
+ * orada sabit kalir. Panel bir canvas'a cizilip duzleme doku olarak
+ * giydirilir. Etkilesim: el takibinde isaret parmagiyla dokunma (poke),
+ * kumandada isin + tetik. Menu kendi durumunu tutmaz; her cizimde degerleri
+ * app.js'in verdigi api'den okur.
  */
 import * as THREE from "three";
 
@@ -40,9 +41,12 @@ export class WristMenu {
    * api: {
    *   model(): { name, realistic, opacity, scale, physics } | null
    *   catalog(): [{ name, url, ... }], currentUrl(): string
-   *   settings(): { throw, push, handStyle, pinch }
+   *   settings(): { throw, push, handStyle, pinch, shadow, dims, ruler, depth, listMode }
+   *   tools(): { exploded, section, sectionT, anchorSaved, modelCount }
    *   actions: { toggleView, opacity(d), scale(f), realSize, fit, physics,
-   *              bringFront, exit, load(entry), refresh, setSetting(k, v) }
+   *              bringFront, exit, load(entry), refresh, setSetting(k, v),
+   *              clearRuler, explode, removeModel, cycleSection, sectionStep(d),
+   *              saveAnchor, forgetAnchor }
    * }
    */
   constructor(api) {
@@ -197,8 +201,8 @@ export class WristMenu {
     const a = this.api.actions;
 
     // Sekmeler
-    const tabs = [["model", "Model"], ["list", "Liste"], ["hands", "El"]];
-    const tw = (PX_W - 48 - 16) / 3;
+    const tabs = [["model", "Model"], ["list", "Liste"], ["tools", "Arac"], ["hands", "El"]];
+    const tw = (PX_W - 48 - 24) / 4;
     tabs.forEach(([id, label], i) => add({
       id: "tab-" + id, kind: "tab", label, active: this.tab === id,
       x: 24 + i * (tw + 8), y: 22, w: tw, h: 64,
@@ -208,6 +212,7 @@ export class WristMenu {
     const top = 112;
     if (this.tab === "model") this.layoutModel(add, a, top);
     else if (this.tab === "list") this.layoutList(add, a, top);
+    else if (this.tab === "tools") this.layoutTools(add, a, top);
     else this.layoutHands(add, a, top);
 
     this.items = items;
@@ -272,7 +277,11 @@ export class WristMenu {
     this.page = Math.min(this.page, pages - 1);
     const current = this.api.currentUrl();
 
-    add({ id: "l-list", kind: "label", label: `${list.length} model`, x: 24, y: top, w: 300, h: 56 });
+    const addMode = this.api.settings().listMode === "add";
+    add({ id: "l-list", kind: "label", label: `${list.length} model`, x: 24, y: top, w: 150, h: 56 });
+    add({ id: "mode", kind: "toggle", label: addMode ? "Sahneye ekle" : "Degistir", active: addMode,
+      x: 180, y: top, w: 230, h: 56,
+      onPress: () => a.setSetting("listMode", addMode ? "replace" : "add") });
     add({ id: "refresh", kind: "button", label: "Yenile", x: PX_W - 24 - 150, y: top, w: 150, h: 56,
       onPress: a.refresh });
 
@@ -300,6 +309,63 @@ export class WristMenu {
       add({ id: "next", kind: "button", label: "▶", x: PX_W - 134, y: py, w: 110, h: 56,
         onPress: () => { this.page = (this.page + 1) % pages; } });
     }
+  }
+
+  layoutTools(add, a, top) {
+    const s = this.api.settings();
+    const t = this.api.tools();
+    const L = 24, R = PX_W - 24, row = 70, h = 60;
+    const half = (R - L - 12) / 2;
+    let y = top;
+
+    const pair = (left, right) => {
+      add({ ...left, x: L, y, w: half, h });
+      add({ ...right, x: L + half + 12, y, w: half, h });
+      y += row;
+    };
+
+    pair(
+      { id: "shadow", kind: "toggle", label: "Golge", active: s.shadow,
+        onPress: () => a.setSetting("shadow", !s.shadow) },
+      { id: "dims", kind: "toggle", label: "Olculer", active: s.dims,
+        onPress: () => a.setSetting("dims", !s.dims) },
+    );
+    pair(
+      { id: "ruler", kind: "toggle", label: s.ruler ? "Cetvel acik" : "Cetvel", active: s.ruler,
+        onPress: () => a.setSetting("ruler", !s.ruler) },
+      { id: "ruler-clear", kind: "button", label: "Cetveli sil", onPress: a.clearRuler },
+    );
+    pair(
+      { id: "explode", kind: "toggle", label: t.exploded ? "Parcalari topla" : "Parcalari ayir",
+        active: t.exploded, onPress: a.explode },
+      { id: "remove", kind: "button", label: "Modeli kaldir", danger: t.modelCount > 1,
+        onPress: a.removeModel },
+    );
+
+    const sectionNames = { off: "Kapali", y: "Yatay", x: "Dikey (X)", z: "Dikey (Z)" };
+    add({ id: "l-sec", kind: "label", label: "Kesit", x: L, y, w: 200, h });
+    add({ id: "section", kind: "toggle", label: sectionNames[t.section], active: t.section !== "off",
+      x: 250, y, w: R - 250, h, onPress: a.cycleSection });
+    y += row;
+    if (t.section !== "off") {
+      add({ id: "l-sect", kind: "label", label: "Kesit yeri", x: L, y, w: 200, h });
+      this.stepper(add, "sect", `%${Math.round(t.sectionT * 100)}`, y,
+        () => a.sectionStep(-0.05), () => a.sectionStep(0.05));
+      y += row;
+    }
+
+    pair(
+      { id: "anchor", kind: "toggle", label: t.anchorSaved ? "Konum kayitli" : "Konumu kaydet",
+        active: t.anchorSaved, onPress: a.saveAnchor },
+      { id: "anchor-forget", kind: "button", label: "Konumu unut", onPress: a.forgetAnchor },
+    );
+
+    add({ id: "l-depth", kind: "label", label: "Gercek nesne ortme", x: L, y, w: 260, h });
+    add({ id: "depth", kind: "toggle", label: s.depth ? "Acik*" : "Kapali", active: s.depth,
+      x: 300, y, w: R - 300, h, onPress: () => a.setSetting("depth", !s.depth) });
+    y += row;
+    add({ id: "depth-note", kind: "text", label: "* ortme sonraki giriste devreye girer",
+      x: L, y: y - 6, w: R - L, h: 30 });
   }
 
   layoutHands(add, a, top) {
@@ -332,7 +398,7 @@ export class WristMenu {
       "Cimdik (bosluga): bakilan yere koy",
       "Cimdik (model yaninda): tut, tasi",
       "Iki elle cimdik: boyut + dondur",
-      "Sag avucu / sag kumandayi cevir: menu",
+      "Sol bilek dugmesi / Y tusu: menu",
     ];
     y += 6;
     for (const [i, line] of help.entries()) {
