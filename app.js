@@ -16,7 +16,7 @@ import * as CANNON from "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cann
 import {
   INDEX_TIP, THUMB_TIP, jointWorld, palmNormal, VelocityTracker, HandOccluder,
 } from "./hands.js";
-import { WristMenu, MENU_WIDTH } from "./menu.js";
+import { WristMenu } from "./menu.js";
 import { splitDisconnected } from "./split.js";
 import { parse3mf, MF_UNITS } from "./threemf.js";
 import { SoftOcclusion } from "./occlusion.js";
@@ -440,9 +440,10 @@ document.addEventListener("visibilitychange", () => {
 
 const SETTINGS_STORAGE = "kaan-mr-viewer.settings";
 const DEFAULT_SETTINGS = {
+  v: 2,
   throw: true, push: true, handStyle: "tips", pinch: "normal",
   shadow: true, dims: false, ruler: false, tech: false, depth: false, listMode: "replace",
-  pinchPlace: true, farGrab: true,
+  pinchPlace: false, farGrab: true,
 };
 
 // Cimdik baslangic / bitis mesafeleri (basparmak ucu - isaret parmagi ucu).
@@ -453,9 +454,17 @@ const PINCH_THRESHOLDS = {
   high: [0.028, 0.042],
 };
 
+// Kayitli ayarlarin surumu: eski kayitta acik kalmis cimdikle yerlestirme
+// bir kez kapatilir (kullanici istemedi; menuden yine acilabilir).
+const SETTINGS_VERSION = 2;
+
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_STORAGE) || "{}");
+    if ((saved.v || 1) < SETTINGS_VERSION) {
+      saved.pinchPlace = false;
+      saved.v = SETTINGS_VERSION;
+    }
     return { ...DEFAULT_SETTINGS, ...saved };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -1658,26 +1667,34 @@ function updateRuler() {
 
 /** Menuyu acar/kapatir; yeri her karede sol bilege gore updateMenuFollow'da. */
 function toggleMenu() {
-  state.menuOpen = !state.menuOpen;
-  if (!state.menuOpen) state.menu.setVisible(false);
+  setMenuOpen(!state.menuOpen);
 }
 
-const _toFingers = new THREE.Vector3();
+function setMenuOpen(open) {
+  state.menuOpen = open;
+  state.wristButton.setOpen(open);
+  if (!open) state.menu.setVisible(false);
+}
+
 const _wristPos = new THREE.Vector3();
-const _knuckle = new THREE.Vector3();
-const _palm = new THREE.Vector3();
+
+const _toHead = new THREE.Vector3();
 
 /**
- * Acik menu sol bilekte saat gibi durur ve kolla birlikte hareket eder:
- * el takibinde ic on kolun ustunde (bilegin gerisinde), kumandada sol
- * kumandanin ustunde. Sag parmak ya da isin menudeyken panel donar; kol
- * titrese de dokunulan dugme kacmaz. Sol el gorunmuyorsa menu gizlenir.
+ * Acik menu sol bilegin yukarisinda, bilek ile yuz arasinda durur ve kolla
+ * birlikte hareket eder. Panel kola degil yuze dogru kaydirildigi icin kol
+ * nasil donerse donsun kolun icine girmez (el golgesi de ortmez). Sag parmak
+ * ya da isin menudeyken panel donar; kol titrese de dokunulan dugme kacmaz.
+ * Sol el gorunmuyorsa menu gizlenir (acik kalir, el gorununce doner).
  */
 function updateMenuFollow() {
   const menu = state.menu;
   if (!state.menuOpen) return;
   const left = state.inputs.find((i) => i.source && i.handedness === "left" && i.tracked);
-  if (!left) {
+  const base = left && (left.isHand
+    ? jointWorld(left.hand, "wrist", _wristPos)
+    : left.grip.getWorldPosition(_wristPos));
+  if (!base) {
     menu.setVisible(false);
     return;
   }
@@ -1687,20 +1704,13 @@ function updateMenuFollow() {
     || state.inputs.some((i) => i.source && !i.isHand && menuRayHit(i));
   if (using && !wasHidden) return;
 
-  if (left.isHand) {
-    const wrist = jointWorld(left.hand, "wrist", _wristPos);
-    const knuckle = wrist && jointWorld(left.hand, "middle-finger-phalanx-proximal", _knuckle);
-    const normal = knuckle && palmNormal(left.hand, "left", _palm);
-    if (!normal) return;
-    _toFingers.subVectors(knuckle, wrist).normalize();
-    // Panelin yakin kenari bilek dugmesinin hemen gerisinde kalsin.
-    menu.group.position.copy(wrist)
-      .addScaledVector(_toFingers, -(0.06 + MENU_WIDTH * 0.6))
-      .addScaledVector(normal, 0.04);
-  } else {
-    left.grip.getWorldPosition(menu.group.position);
-    menu.group.position.y += 0.17;
-  }
+  // Bilekten yuze dogru 14 cm, ustune 17 cm: panelin alt kenari (13 cm asagida)
+  // on kolun ust yuzeyinin ustunde kalir.
+  _toHead.subVectors(_headPos, base);
+  _toHead.y = 0;
+  if (_toHead.lengthSq() < 1e-4) _toHead.set(0, 0, 1);
+  _toHead.normalize();
+  menu.group.position.copy(base).addScaledVector(_toHead, 0.14).addScaledVector(_up, 0.17);
   menu.group.lookAt(_headPos);
 }
 
@@ -1723,9 +1733,10 @@ function updateWristButton() {
   btn.mesh.visible = _wristShown;
   if (!_wristShown) return;
 
-  // Bilegin ic tarafi, onkola dogru: saat bakar gibi.
-  const toFingers = knuckle.sub(wrist).normalize();
-  btn.mesh.position.copy(wrist).addScaledVector(toFingers, -0.035).addScaledVector(normal, 0.02);
+  // Bilegin hemen ustunde, yuze dogru biraz one: kolun icine girmez.
+  _toHead.subVectors(_headPos, wrist).normalize();
+  btn.mesh.position.copy(wrist).addScaledVector(_toHead, 0.05).addScaledVector(normal, 0.015);
+  btn.mesh.position.y += 0.025;
   btn.mesh.lookAt(_headPos);
 
   const right = state.inputs.find((i) => i.source && i.isHand && i.handedness === "right" && i.tracked);
@@ -2595,6 +2606,7 @@ function buildMenu() {
       sectionStep,
       saveAnchor: requestAnchorSave,
       animToggle: toggleAnimation,
+      close: () => setMenuOpen(false),
       roomCreate: () => multi.create(),
       roomJoin: (code) => multi.connect(code),
       roomLeave: () => multi.leave(),
@@ -2673,6 +2685,7 @@ async function enterAR() {
   state.ruler.clear();
   state.anchorRequest = null;
   state.menuOpen = false;
+  state.wristButton.setOpen(false);
   multi.sessionStarted();
 
   buildMenu();
@@ -2749,6 +2762,9 @@ function onFrame(time, frame) {
     if (hits.length) {
       const pose = hits[0].getPose(refSpace);
       state.reticle.visible = true;
+      // Isabet yine hesaplanir (yuzey ogrenme, yerlestirme) ama halka yalnizca
+      // cimdikle yerlestirme aciksa cizilir.
+      state.reticle.material.visible = settings.pinchPlace;
       state.reticle.matrix.fromArray(pose.transform.matrix);
       learnSurface(pose.transform.matrix);
     } else {

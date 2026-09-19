@@ -10,9 +10,13 @@
 import * as THREE from "three";
 
 const PX_W = 600;
-const PX_H = 720;
-export const MENU_WIDTH = 0.24;                   // metre
-const MENU_HEIGHT = MENU_WIDTH * PX_H / PX_W;     // 0.288 m
+const PX_H = 800;
+export const MENU_WIDTH = 0.2;                    // metre
+const MENU_HEIGHT = MENU_WIDTH * PX_H / PX_W;     // 0.267 m
+// Ustte baslik cubugu (baslik + kapat), altinda sekmeler, sonra icerik.
+const HEADER_H = 72;
+const TABS_Y = HEADER_H + 10;
+const CONTENT_TOP = TABS_Y + 64 + 22;
 
 // Parmak ucu panel yuzeyine bu kadar yaklasinca basilmis sayilir; geri
 // cekilince tekrar basilabilir. Aradaki fark titremeyle cift tiklamayi onler.
@@ -22,14 +26,18 @@ const HOVER_DEPTH = 0.06;
 const PAGE_SIZE = 6;
 
 const C = {
-  bg: "rgba(13, 17, 27, 0.94)",
-  surface: "#1c2436",
-  surfaceHover: "#27324a",
-  line: "#34425f",
-  text: "#e8ecf4",
-  muted: "#9aa6bd",
+  bgTop: "rgba(26, 34, 51, 0.97)",
+  bgBottom: "rgba(12, 16, 25, 0.97)",
+  header: "rgba(255, 255, 255, 0.04)",
+  surface: "#222b3e",
+  surfaceHover: "#2d3950",
+  line: "rgba(110, 168, 254, 0.35)",
+  divider: "rgba(255, 255, 255, 0.07)",
+  text: "#eef2f8",
+  muted: "#98a3ba",
   accent: "#6ea8fe",
-  accentSoft: "rgba(110, 168, 254, 0.24)",
+  accentHover: "#8bbaff",
+  onAccent: "#0b1222",
   ok: "#3ddc97",
   err: "#f4696b",
 };
@@ -200,16 +208,21 @@ export class WristMenu {
     const add = (it) => { items.push(it); return it; };
     const a = this.api.actions;
 
-    // Sekmeler
+    // Baslik cubugu: kapat
+    add({ id: "close", kind: "close", label: "✕", x: PX_W - 24 - 64, y: 12, w: 64, h: 48,
+      onPress: () => a.close && a.close() });
+
+    // Sekmeler: tek bir hap icinde, secili olan dolu
     const tabs = [["model", "Model"], ["list", "Liste"], ["tools", "Arac"], ["hands", "El"], ["room", "Oda"]];
-    const tw = (PX_W - 48 - 32) / 5;
+    const tw = (PX_W - 48 - 8) / 5;
+    add({ id: "tabbar", kind: "tabbar", x: 24, y: TABS_Y, w: PX_W - 48, h: 64 });
     tabs.forEach(([id, label], i) => add({
       id: "tab-" + id, kind: "tab", label, active: this.tab === id,
-      x: 24 + i * (tw + 8), y: 22, w: tw, h: 64,
+      x: 28 + i * tw, y: TABS_Y + 4, w: tw - 0, h: 56,
       onPress: () => { this.tab = id; this.page = 0; },
     }));
 
-    const top = 112;
+    const top = CONTENT_TOP;
     if (this.tab === "model") this.layoutModel(add, a, top);
     else if (this.tab === "list") this.layoutList(add, a, top);
     else if (this.tab === "tools") this.layoutTools(add, a, top);
@@ -478,12 +491,36 @@ export class WristMenu {
   draw() {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, PX_W, PX_H);
-    roundRect(ctx, 0, 0, PX_W, PX_H, 28);
-    ctx.fillStyle = C.bg;
+
+    // Govde: dikey degrade, ince mavi kenar
+    roundRect(ctx, 2, 2, PX_W - 4, PX_H - 4, 36);
+    const g = ctx.createLinearGradient(0, 0, 0, PX_H);
+    g.addColorStop(0, C.bgTop);
+    g.addColorStop(1, C.bgBottom);
+    ctx.fillStyle = g;
     ctx.fill();
     ctx.strokeStyle = C.line;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 3;
     ctx.stroke();
+
+    // Baslik cubugu
+    ctx.save();
+    roundRect(ctx, 2, 2, PX_W - 4, PX_H - 4, 36);
+    ctx.clip();
+    ctx.fillStyle = C.header;
+    ctx.fillRect(0, 0, PX_W, HEADER_H);
+    ctx.restore();
+    ctx.fillStyle = C.divider;
+    ctx.fillRect(24, HEADER_H, PX_W - 48, 2);
+    ctx.fillStyle = C.accent;
+    ctx.beginPath();
+    ctx.arc(40, HEADER_H / 2, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = C.text;
+    ctx.font = `700 28px ${FONT}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Kaan MR", 60, HEADER_H / 2 + 1);
 
     for (const it of this.items) this.drawItem(it);
 
@@ -502,10 +539,17 @@ export class WristMenu {
     const flash = this.flashId === it.id;
     ctx.textBaseline = "middle";
 
+    if (it.kind === "tabbar") {
+      roundRect(ctx, it.x, it.y, it.w, it.h, it.h / 2);
+      ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+      ctx.fill();
+      return;
+    }
+
     if (it.kind === "label" || it.kind === "text" || it.kind === "title") {
       ctx.fillStyle = it.kind === "text" ? C.muted : C.text;
       ctx.font = it.kind === "title" ? `700 30px ${FONT}`
-        : it.kind === "text" ? `400 22px ${FONT}` : `600 26px ${FONT}`;
+        : it.kind === "text" ? `400 23px ${FONT}` : `600 27px ${FONT}`;
       ctx.textAlign = "left";
       ctx.fillText(ellipsis(ctx, it.label, it.w), it.x, it.y + it.h / 2);
       return;
@@ -519,21 +563,27 @@ export class WristMenu {
       return;
     }
 
-    // Tiklanabilir kutular
-    roundRect(ctx, it.x, it.y, it.w, it.h, 14);
-    let fill = C.surface;
-    if (it.active) fill = C.accentSoft;
-    if (hover) fill = it.active ? "rgba(110, 168, 254, 0.34)" : C.surfaceHover;
-    if (flash) fill = C.accent;
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.strokeStyle = it.active ? C.accent : hover ? C.line : "transparent";
-    ctx.lineWidth = 2;
-    if (it.active || hover) ctx.stroke();
+    // Tiklanabilir kutular: acik olan dolu mavi (koyu yazi), digerleri koyu yuzey.
+    const pill = it.kind === "tab" || it.kind === "close";
+    roundRect(ctx, it.x, it.y, it.w, it.h, pill ? it.h / 2 : 16);
+    let fill = it.kind === "tab" || it.kind === "close" ? "transparent" : C.surface;
+    if (it.active) fill = hover ? C.accentHover : C.accent;
+    else if (hover) fill = C.surfaceHover;
+    if (flash) fill = "#ffffff";
+    if (fill !== "transparent") {
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
+    if (hover && !it.active) {
+      ctx.strokeStyle = C.line;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
 
-    let color = it.active ? C.accent : C.text;
-    if (it.danger) color = C.err;
-    if (flash) color = "#0b1020";
+    let color = it.active ? C.onAccent : C.text;
+    if (it.danger && !it.active) color = C.err;
+    if (it.kind === "close" && !hover) color = C.muted;
+    if (flash) color = C.onAccent;
     ctx.fillStyle = color;
 
     if (it.kind === "item") {
@@ -551,7 +601,7 @@ export class WristMenu {
     }
 
     ctx.textAlign = "center";
-    ctx.font = it.kind === "tab" ? `700 26px ${FONT}` : `600 25px ${FONT}`;
+    ctx.font = it.kind === "tab" ? `700 25px ${FONT}` : it.kind === "close" ? `600 30px ${FONT}` : `600 26px ${FONT}`;
     ctx.fillText(ellipsis(ctx, it.label, it.w - 16), it.x + it.w / 2, it.y + it.h / 2);
   }
 }

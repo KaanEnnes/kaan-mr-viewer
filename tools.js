@@ -482,42 +482,75 @@ export class Section {
 // --- bilek dugmesi --------------------------------------------------------------
 
 /**
- * Sol bilekte, avuc kullaniciya donunce beliren yuvarlak menu dugmesi.
- * Diger elin isaret parmagiyla dokununca basilir.
+ * Sol bilekte, avuc kullaniciya donunce beliren "Menu" dugmesi. Yazili bir
+ * hap: menu acikken "Kapat" olur, basinca mavi yanar. Diger elin isaret
+ * parmagiyla dokununca basilir.
  */
 export class WristButton {
   constructor(scene) {
-    const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = 128;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "rgba(13, 17, 27, 0.9)";
-    ctx.beginPath();
-    ctx.arc(64, 64, 60, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "#6ea8fe";
-    ctx.lineWidth = 6;
-    ctx.stroke();
-    ctx.fillStyle = "#e8ecf4";
-    for (const y of [42, 60, 78]) ctx.fillRect(38, y, 52, 8);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
+    this.canvas = document.createElement("canvas");
+    this.canvas.width = 320;
+    this.canvas.height = 120;
+    this.texture = new THREE.CanvasTexture(this.canvas);
+    this.texture.colorSpace = THREE.SRGBColorSpace;
     this.mesh = new THREE.Mesh(
-      new THREE.CircleGeometry(0.02, 32),
-      new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false }),
+      new THREE.PlaneGeometry(0.075, 0.075 * 120 / 320),
+      new THREE.MeshBasicMaterial({ map: this.texture, transparent: true, depthWrite: false }),
     );
-    this.mesh.renderOrder = 9;
+    this.mesh.renderOrder = 11;
     this.mesh.visible = false;
     scene.add(this.mesh);
     this.armed = true;
+    this.open = false;
+    this.flashUntil = 0;
+    this.near = false;
+    this._drawn = "";
+    this.draw();
+  }
+
+  draw() {
+    const pressed = performance.now() < this.flashUntil;
+    const key = `${this.open}|${pressed}|${this.near}`;
+    if (key === this._drawn) return;
+    this._drawn = key;
+    const ctx = this.canvas.getContext("2d");
+    const w = this.canvas.width, h = this.canvas.height, r = h / 2 - 6;
+    ctx.clearRect(0, 0, w, h);
+    ctx.beginPath();
+    ctx.roundRect(6, 6, w - 12, h - 12, r);
+    ctx.fillStyle = pressed ? "#6ea8fe" : this.near ? "rgba(45, 57, 80, 0.96)" : "rgba(20, 26, 40, 0.94)";
+    ctx.fill();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = "#6ea8fe";
+    ctx.stroke();
+    ctx.fillStyle = pressed ? "#0b1222" : "#eef2f8";
+    ctx.font = `700 44px ${FONT}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(this.open ? "✕  Kapat" : "☰  Menu", w / 2, h / 2 + 2);
+    this.texture.needsUpdate = true;
+  }
+
+  setOpen(open) {
+    this.open = open;
+    this.draw();
   }
 
   /** Dokunma olursa true doner. */
   poke(tip) {
     if (!this.mesh.visible || !tip) return false;
     const d = tip.distanceTo(this.mesh.position);
-    if (d > 0.045) this.armed = true;
+    const near = d < 0.06;
+    if (near !== this.near) {
+      this.near = near;
+      this.draw();
+    }
+    if (d > 0.05) this.armed = true;
     if (this.armed && d < 0.022) {
       this.armed = false;
+      this.flashUntil = performance.now() + 180;
+      this.draw();
+      setTimeout(() => this.draw(), 200);
       return true;
     }
     return false;
