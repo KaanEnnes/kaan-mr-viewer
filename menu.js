@@ -492,9 +492,15 @@ export class WristMenu {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, PX_W, PX_H);
 
+    // Panel icerigi kadar uzun: kisa sekmelerde altta bos alan kalmasin
+    // (kalan kisim saydam; dokunma orada hicbir seye denk gelmez).
+    const contentBottom = Math.max(...this.items.map((it) => it.y + it.h));
+    const H = Math.min(PX_H, contentBottom + (this.status ? 64 : 28));
+    this.statusY = H - 30;
+
     // Govde: dikey degrade, ince mavi kenar
-    roundRect(ctx, 2, 2, PX_W - 4, PX_H - 4, 36);
-    const g = ctx.createLinearGradient(0, 0, 0, PX_H);
+    roundRect(ctx, 2, 2, PX_W - 4, H - 4, 36);
+    const g = ctx.createLinearGradient(0, 0, 0, H);
     g.addColorStop(0, C.bgTop);
     g.addColorStop(1, C.bgBottom);
     ctx.fillStyle = g;
@@ -505,7 +511,7 @@ export class WristMenu {
 
     // Baslik cubugu
     ctx.save();
-    roundRect(ctx, 2, 2, PX_W - 4, PX_H - 4, 36);
+    roundRect(ctx, 2, 2, PX_W - 4, H - 4, 36);
     ctx.clip();
     ctx.fillStyle = C.header;
     ctx.fillRect(0, 0, PX_W, HEADER_H);
@@ -529,7 +535,7 @@ export class WristMenu {
       ctx.font = `500 22px ${FONT}`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(ellipsis(ctx, this.status, PX_W - 48), PX_W / 2, PX_H - 26);
+      ctx.fillText(ellipsis(ctx, this.status, PX_W - 48), PX_W / 2, this.statusY);
     }
   }
 
