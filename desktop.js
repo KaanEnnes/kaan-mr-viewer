@@ -274,7 +274,10 @@ export function initDesktop(api) {
     const hit = pick(e);
     if (!hit) return;
     if (settings.tech) {
-      if (hit.part) state.tech.toggle(hit.part);
+      if (hit.part) {
+        state.tech.toggle(hit.part);
+        api.applyIsolation();
+      }
     } else {
       state.ruler.addPoint(hit.point, hit.holder);
     }

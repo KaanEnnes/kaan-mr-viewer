@@ -26,6 +26,9 @@ import { Label, ShadowCatcher, Ruler, TechDetail, Section, SECTION_MODES, WristB
 // --- sabitler ---------------------------------------------------------------
 
 const GHOST_OPACITY = 0.45;
+// Teknik detayda secili olmayan parcalar bu kadar saydam: secilen one cikar,
+// digerleri yerini belli edecek kadar gorunur.
+const ISOLATE_OPACITY = 0.08;
 // Cubuk ne kadar itilirse itilsin kucuk hareketler yok sayilsin.
 const DEADZONE = 0.2;
 const ROTATE_SPEED = 1.6;   // radyan/saniye
@@ -470,7 +473,10 @@ function setSetting(key, value) {
   // Cetvel ve teknik detay ayni dokunusu kullanir: biri acilinca digeri kapanir.
   if (key === "ruler" && value) settings.tech = false;
   if (key === "tech" && value) settings.ruler = false;
-  if (key === "ruler" || key === "tech") state.ruler?.cancel();
+  if (key === "ruler" || key === "tech") {
+    state.ruler?.cancel();
+    applyIsolation();
+  }
   const onOff = value ? "acik" : "kapali";
   const labels = {
     throw: `Firlatma ${onOff}`,
@@ -1111,7 +1117,33 @@ function setOpacity(value) {
     mat.depthWrite = !see;
     mat.needsUpdate = true;
   }
+  applyIsolation();
   state.menu?.invalidate();
+}
+
+/**
+ * Teknik detayda parca secildiyse o modelin diger parcalarini cok saydam
+ * yapar; secim yoksa ya da teknik detay kapaliysa modelin kendi saydamligina
+ * dondurur.
+ */
+function applyIsolation() {
+  const selected = state.tech ? state.tech.items : new Map();
+  for (const m of state.models) {
+    const isolating = settings.tech && m.parts.some((p) => selected.has(p));
+    for (const part of m.parts) {
+      const faded = isolating && !selected.has(part);
+      const mats = Array.isArray(part.material) ? part.material : [part.material];
+      for (const mat of mats) {
+        if (!mat) continue;
+        const see = m.opacity < 0.999;
+        mat.opacity = faded ? ISOLATE_OPACITY : m.opacity;
+        mat.transparent = faded || see || Boolean(state.occlusion);
+        mat.depthWrite = !faded && !see;
+        mat.needsUpdate = true;
+      }
+      part.castShadow = !faded;
+    }
+  }
 }
 
 function toggleView() {
@@ -1513,13 +1545,15 @@ function toggleTech(part) {
     hud("Parca bulunamadi: parcanin ustune dokun", 1500);
     return;
   }
-  hud(state.tech.toggle(part) ? "Parca olculeri gosteriliyor" : "Parca secimi kaldirildi", 1200);
+  hud(state.tech.toggle(part) ? "Parca secildi: digerleri saydam" : "Parca secimi kaldirildi", 1200);
+  applyIsolation();
   state.menu?.invalidate();
 }
 
 function clearMeasurements() {
   state.ruler.clear();
   state.tech.clear();
+  applyIsolation();
   hud("Olcumler silindi", 900);
   state.menu?.invalidate();
   desktop?.refresh();
@@ -2637,7 +2671,7 @@ desktop = initDesktop({
   toggleView, setOpacity, setScale, toggleExplode, updateExplode, applySection,
   togglePhysics, liftAboveFloor, buildBodies, removeBodies, syncPartsFromBodies,
   updateShadowAndDims, toggleAnimation, seekAnimation, updateAnimations,
-  restoreHome, applyExplode, realScaleOf, clearMeasurements,
+  restoreHome, applyExplode, realScaleOf, clearMeasurements, applyIsolation,
   fitScaleOf: (m) => (m.longest > DEFAULT_SIZE ? DEFAULT_SIZE / m.longest : 1),
 });
 state.renderer.setAnimationLoop(desktop.frame);
