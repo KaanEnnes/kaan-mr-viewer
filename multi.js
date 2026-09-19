@@ -67,6 +67,10 @@ export function initMulti(api) {
   const markers = new THREE.Group();
   state.scene.add(markers);
 
+  // Esitleme kare cizimine bagli degil: arka plandaki sekmede tarayici kare
+  // dongusunu durdurur ama zamanlayici (yavaslasa da) calisir.
+  setInterval(() => tick(performance.now()), STATE_INTERVAL / 2);
+
   // --- durum / arayuz -------------------------------------------------------
 
   const listeners = new Set();
@@ -492,8 +496,8 @@ export function initMulti(api) {
     startCalibration,
     capturePoint,
     onChange: (fn) => listeners.add(fn),
-    update(now) {
-      tick(now);
+    /** Her karede: avatar isimleri kullaniciya donsun. */
+    update() {
       for (const p of m.peers.values()) p.avatar.face(state.session ? api.headPos() : state.camera.position);
     },
     sessionStarted() {
