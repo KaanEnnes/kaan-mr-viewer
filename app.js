@@ -7,7 +7,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { ThreeMFLoader } from "three/addons/loaders/3MFLoader.js";
-import { unzipSync, strFromU8 } from "three/addons/libs/fflate.module.js";
 import { XRHandModelFactory } from "three/addons/webxr/XRHandModelFactory.js";
 import * as CANNON from "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js";
 import {
@@ -15,6 +14,7 @@ import {
 } from "./hands.js";
 import { WristMenu } from "./menu.js";
 import { splitDisconnected } from "./split.js";
+import { parse3mf, MF_UNITS } from "./threemf.js";
 import { Label, ShadowCatcher, Ruler, Section, SECTION_MODES, WristButton } from "./tools.js";
 
 // --- sabitler ---------------------------------------------------------------
@@ -525,34 +525,25 @@ function loadGltf(url) {
   });
 }
 
-// 3MF'in kendi birim tanimi; varsayilan milimetre (Tinkercad, dilimleyiciler).
-const MF_UNITS = {
-  micron: 1e-6, millimeter: 1e-3, centimeter: 1e-2,
-  inch: 0.0254, foot: 0.3048, meter: 1,
-};
-
-function read3mfUnit(buffer) {
-  try {
-    const files = unzipSync(new Uint8Array(buffer));
-    const modelPath = Object.keys(files).find((f) => /^3D\/.*\.model$/i.test(f));
-    if (!modelPath) return MF_UNITS.millimeter;
-    // Sadece kok <model> etiketine bakmak yeterli.
-    const head = strFromU8(files[modelPath].subarray(0, 4096));
-    const m = head.match(/<model[^>]*\sunit\s*=\s*"([a-z]+)"/i);
-    return (m && MF_UNITS[m[1].toLowerCase()]) || MF_UNITS.millimeter;
-  } catch {
-    return MF_UNITS.millimeter;
-  }
-}
-
+/**
+ * 3MF: once kendi okuyucumuz (Bambu/Creality/Prusa'nin kullandigi Production
+ * eklentisi dahil), bulamazsa three.js'in okuyucusu.
+ */
 async function load3mf(url) {
   const buffer = await (await fetch(url)).arrayBuffer();
-  const group = threeMfLoader.parse(buffer);
+  let parsed = null;
+  try {
+    parsed = parse3mf(buffer);
+  } catch {
+    parsed = null;
+  }
+  if (!parsed) parsed = { group: threeMfLoader.parse(buffer), unitScale: MF_UNITS.millimeter };
+
   // 3MF Z-yukari ve genelde milimetre; sahne Y-yukari ve metre.
   const wrapper = new THREE.Group();
-  group.rotation.x = -Math.PI / 2;
-  group.scale.setScalar(read3mfUnit(buffer));
-  wrapper.add(group);
+  parsed.group.rotation.x = -Math.PI / 2;
+  parsed.group.scale.setScalar(parsed.unitScale);
+  wrapper.add(parsed.group);
   wrapper.updateMatrixWorld(true);
   return wrapper;
 }
