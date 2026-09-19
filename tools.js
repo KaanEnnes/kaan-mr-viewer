@@ -10,9 +10,12 @@ const FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 
 // --- yazi etiketi -------------------------------------------------------------
 
-/** Kullaniciya donen, canvas'tan cizilmis tek satirlik yazi. */
+/**
+ * Kullaniciya donen, canvas'tan cizilmis tek satirlik yazi. onTop: olcu
+ * yazilari modelin icinde/arkasinda kalmasin diye derinlik testsiz en uste.
+ */
 export class Label {
-  constructor(widthM = 0.2, pxW = 640, pxH = 110) {
+  constructor(widthM = 0.2, onTop = false, pxW = 640, pxH = 110) {
     this.canvas = document.createElement("canvas");
     this.canvas.width = pxW;
     this.canvas.height = pxH;
@@ -22,7 +25,8 @@ export class Label {
       new THREE.PlaneGeometry(widthM, widthM * pxH / pxW),
       new THREE.MeshBasicMaterial({ map: this.texture, transparent: true, depthWrite: false }),
     );
-    this.mesh.renderOrder = 8;
+    this.mesh.renderOrder = onTop ? 12 : 8;
+    this.mesh.material.depthTest = !onTop;
     this.mesh.visible = false;
     this.text = null;
   }
@@ -139,7 +143,7 @@ class Measurement {
       o.renderOrder = 9;
       this.group.add(o);
     }
-    this.label = new Label(0.12);
+    this.label = new Label(0.12, true);
     scene.add(this.group, this.label.mesh);
     this.holder = null; // yapistigi model (tasininca birlikte gider)
     this._a = new THREE.Vector3();
@@ -261,6 +265,8 @@ export class TechDetail {
     this.scene = scene;
     this.items = new Map(); // parca -> { box, labels, local }
     this._p = [new THREE.Vector3(), new THREE.Vector3()];
+    this._c = new THREE.Vector3();
+    this._out = new THREE.Vector3();
   }
 
   get count() { return this.items.size; }
@@ -279,7 +285,7 @@ export class TechDetail {
     box.position.copy(local.getCenter(new THREE.Vector3()));
     box.renderOrder = 9;
     part.add(box);
-    const labels = [new Label(0.1), new Label(0.1), new Label(0.1)];
+    const labels = [new Label(0.1, true), new Label(0.1, true), new Label(0.1, true)];
     for (const l of labels) this.scene.add(l.mesh);
     this.items.set(part, { box, labels, local });
     return true;
@@ -313,12 +319,17 @@ export class TechDetail {
         [[max.x, min.y, max.z], [max.x, max.y, max.z]],
       ];
       const div = realScale(part) || 1;
+      const centre = it.local.getCenter(this._c).applyMatrix4(part.matrixWorld);
       edges.forEach(([a, b], i) => {
         const pa = this._p[0].set(...a).applyMatrix4(part.matrixWorld);
         const pb = this._p[1].set(...b).applyMatrix4(part.matrixWorld);
         const len = pa.distanceTo(pb) / div;
         it.labels[i].set(formatLength(len));
-        it.labels[i].place(pa.add(pb).multiplyScalar(0.5), headPos);
+        // Yazi kenarin tam ustune degil, kutunun disina dogru biraz kaysin.
+        const mid = pa.add(pb).multiplyScalar(0.5);
+        const out = this._out.subVectors(mid, centre);
+        if (out.lengthSq() > 1e-10) mid.addScaledVector(out.normalize(), 0.018);
+        it.labels[i].place(mid, headPos);
       });
     }
   }

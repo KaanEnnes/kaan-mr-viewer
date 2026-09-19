@@ -251,6 +251,9 @@ footer { margin-top: 28px; }
   .controls dd { margin-bottom: 8px; }
 }
 
+/* hidden ozniteligi display kurallarina (flex/grid) ezilmesin. */
+[hidden] { display: none !important; }
+
 /* --- PC onizleme ------------------------------------------------------------ */
 
 .viewer {
