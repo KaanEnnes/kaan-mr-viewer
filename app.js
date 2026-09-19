@@ -14,6 +14,7 @@ import {
   INDEX_TIP, THUMB_TIP, jointWorld, palmNormal, palmCentre, VelocityTracker, HandOccluder,
 } from "./hands.js";
 import { WristMenu } from "./menu.js";
+import { splitDisconnected } from "./split.js";
 import { Label, ShadowCatcher, Ruler, Section, SECTION_MODES, WristButton } from "./tools.js";
 
 // --- sabitler ---------------------------------------------------------------
@@ -571,6 +572,21 @@ function loadModel(entry) {
 async function spawnModel(entry) {
   const root = await loadModel(entry);
 
+  // Tek mesh'e gomulmus parcalari (Creality vb. donusturuculer) kabuklarina
+  // ayir. Pipeline'in PART_ adli parcalari zaten ayri; onlara dokunulmaz.
+  let pipelineParts = false;
+  root.traverse((o) => { if (o.name.startsWith("PART_")) pipelineParts = true; });
+  if (!pipelineParts) splitDisconnected(root);
+
+  // GLB standardi metre ister ama dilimleyiciler cogu zaman milimetre yazar:
+  // 21 cm'lik kalemlik 210 m gelir. 20 m'den buyuk model milimetre sayilir.
+  // (3MF kendi birimini tasir, load3mf onu zaten uyguladi.)
+  if ((entry.format || formatOf(entry.url)) !== "3mf") {
+    root.updateMatrixWorld(true);
+    const raw = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
+    if (Math.max(raw.x, raw.y, raw.z) > 20) root.scale.multiplyScalar(0.001);
+  }
+
   // Collider olarak gomulmus hull'lar cizilmemeli.
   const hulls = [];
   root.traverse((o) => { if (o.name.startsWith("COL_")) hulls.push(o); });
@@ -1108,7 +1124,8 @@ function updateShadowAndDims() {
     return;
   }
   // Olculer modelin kendi ekseninde, gercek (olcekli) boyutla: dondurunce degismez.
-  const size = m.localBox.getSize(_v2).multiplyScalar(m.holder.scale.x * 100);
+  // localBox root ekseninde; root'un kendi olcegi (milimetre -> metre) de hesaba girer.
+  const size = m.localBox.getSize(_v2).multiplyScalar(m.root.scale.x * m.holder.scale.x * 100);
   const f = (v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
   state.dimsLabel.set(`${f(size.x)} × ${f(size.z)} × ${f(size.y)} cm`);
   _box.setFromObject(m.holder);
