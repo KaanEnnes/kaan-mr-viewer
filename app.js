@@ -479,6 +479,8 @@ function setSetting(key, value) {
   if (key === "tech" && value) settings.ruler = false;
   if (key === "ruler" || key === "tech") {
     state.ruler?.cancel();
+    // Teknik detay kapaninca secimler de kalkar (odada da).
+    if (key === "tech" && !value) state.tech?.clear();
     applyIsolation();
   }
   const onOff = value ? "acik" : "kapali";
@@ -1168,7 +1170,8 @@ function setOpacityFor(m, value) {
 function applyIsolation() {
   const selected = state.tech ? state.tech.items : new Map();
   for (const m of state.models) {
-    const isolating = settings.tech && m.parts.some((p) => selected.has(p));
+    // Secim varsa izole et (odadan gelen secim de; yerel dugmeden bagimsiz).
+    const isolating = m.parts.some((p) => selected.has(p));
     for (const part of m.parts) {
       const faded = isolating && !selected.has(part);
       const mats = Array.isArray(part.material) ? part.material : [part.material];
